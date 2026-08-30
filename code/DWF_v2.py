@@ -8,7 +8,7 @@ np.set_printoptions(precision=2, suppress=True)
 # GLOBAL VARIABLES
 Harvested_energy = np.array([10, 6, 9, 15, 16, 1])
 Transmission_duration = np.array([2, 3, 3, 3, 2, 1])
-LOWER_BATTERY_LIMIT = 2
+LOWER_BATTERY_LIMIT = 1
 INIT_BATTERY_LEVEL = 0
 EPS = 1e-9
 
@@ -91,25 +91,65 @@ def is_feasible(power, energy_harvested, transmission_duration):
     return True
 
 
-def directional_water_filling_with_validation(energy_for_transmission, transmission_duration):
+def directional_water_filling_with_validation(Harvested_energy, transmission_duration):
     '''DWF with battery feasibility validation. Operates on OPERATION energy
     (already reserve-adjusted), so the pooling logic itself is unchanged.'''
-    n = len(energy_for_transmission)
-    power = compute_power(energy_for_transmission, transmission_duration)
+    # transmission_blocks = len(Harvested_energy)
+    n = len(Harvested_energy)
+    power = compute_power(Harvested_energy, transmission_duration)
     print(f"Initial Power: {power}")
 
+    iteration = 0
     changed = True
     while changed:
         changed = False
+        iteration += 1
+        print(f"\nIteration {iteration}: {power}")
+
+
         for i in range(n - 1):
             if power[i] > power[i + 1] + EPS:
+                print(f"  Detected flow at i={i}: {power[i]:.3f} > {power[i+1]:.3f}, pooling...")
                 start, end = i, i + 1
                 while start > 0 and power[start - 1] >= power[start] - EPS:
                     start -= 1
                 while end < n - 1 and power[end] > power[end + 1] + EPS:
                     end += 1
 
-                avg_power = (np.sum(energy_for_transmission[start:end + 1])/np.sum(transmission_duration[start:end + 1]))
+                print(f"  Hill segment: blocks {start} to {end}")
+
+                # Compute average power
+                avg_power = np.sum(Harvested_energy[start:end + 1]) / np.sum(Transmission_duration[start:end + 1])
+                print(f"  Average power: {avg_power:.4f}")
+
+                # Test if this allocation is feasible
+                temp_power = power.copy()
+                temp_power[start:end + 1] = avg_power
+
+                if is_feasible(temp_power, Harvested_energy, Transmission_duration):
+                    # It's feasible! Apply the change
+                    power[start:end + 1] = avg_power
+                    print(f"  Applied: {power}")
+                    changed = True
+                    break
+                else:
+                    # Not feasible - this means the hill should be smaller
+                    print("  Not feasible, trying smaller hill")
+                    if end > start + 1:
+                        end -= 1
+                        avg_power = np.sum(Harvested_energy[start:end + 1]) / np.sum(Transmission_duration[start:end + 1])
+                        temp_power = power.copy()
+                        temp_power[start:end + 1] = avg_power
+
+                        if is_feasible(temp_power, Harvested_energy, Transmission_duration):
+                            power[start:end + 1] = avg_power
+                            print(f"  Applied smaller hill: {power}")
+                            changed = True
+                            break
+                    else:
+                        print("  Cannot reduce further, skipping")
+
+                avg_power = (np.sum(Harvested_energy[start:end + 1])/np.sum(transmission_duration[start:end + 1]))
                 power[start:end + 1] = avg_power
                 changed = True
                 break
@@ -137,6 +177,11 @@ def main():
     print(f"\nIs feasible? {is_feasible(power, Harvested_energy, Transmission_duration)}")
     min_battery = np.min(battery_level)
     print(f"Minimum battery level: {min_battery}")
+
+    return power 
+
+operation_energy = compute_operation_energy(Harvested_energy, LOWER_BATTERY_LIMIT)
+power = directional_water_filling_with_validation(operation_energy, Transmission_duration)
 
 
 if __name__ == "__main__":
