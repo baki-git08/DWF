@@ -1,5 +1,6 @@
 import numpy as np
 from DWF_v2 import power
+from evaluation import calculate_total_noise
 
 thz_freq = np.array([0.30, 0.45, 0.48, 0.60, 0.66, 0.90, 0.99, 1.05, 
                      1.26, 1.29, 1.31, 1.40, 1.53, 1.56, 1.83, 1.98, 
@@ -65,6 +66,23 @@ print(f"Attenuation at {chosen_frequency} THz over {distance_m*100} cm: {channel
 for power_value in power:
     recieved_power = received_signal_power(transmitted_power=power_value, frequency=chosen_frequency, electromagnetic_wave_type='THz')
     print(f"Received signal power at {chosen_frequency} THz with transmitted power of {power_value} W: {recieved_power} W")
+    results = calculate_total_noise(P_r=recieved_power, R=0.5, B=None, I_dark=1e-9, rise_time=1e-9)
 
-
+    print(f"Input Parameters:")
+    print(f"  Received Power: {recieved_power*1000:.6f} W")
+    print(f"  Responsivity: {0.5:.2f} A/W")
+    print(f"  Dark Current: {1e-9*1e9:.1f} nA")
+    print(f"  Rise Time: {1e-9*1e9:.1f} ns")
+    print(f"  Bandwidth: {results['bandwidth']/1e6:.1f} MHz")
+    print()
+    print(f"Noise Components:")
+    print(f"  Shot Noise: {results['shot_noise']:.2e} A²")
+    print(f"  Dark Noise: {results['dark_noise']:.2e} A²")
+    print(f"  Thermal Noise: {results['thermal_noise']:.2e} A²")
+    print(f"  Total Noise: {results['total_noise']:.2e} A²")
+    print()
+    print(f"SNR:")
+    print(f"  Linear: {results['snr_linear']:.2e}")
+    print(f"  dB: {results['snr_db']:.2f} dB")
+    print(f"  Signal Current: {results['signal_current']:.2e} A")
 
