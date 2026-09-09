@@ -10,7 +10,7 @@ class SolarHarvester:
         self.panel_area = panel_area
         self.panel_efficiency = panel_efficiency
         
-        # Location data - surface irradiance (kWh/m²/day) [5†L13-L15][6†L3-L9]
+        # Location data - surface irradiance (kWh/m²/day)  
         self.locations = {
             'Upington': {'annual': 2400, 'peak_hours': 6.6,
                          'summer': 8.0, 'autumn': 6.5, 'winter': 5.5, 'spring': 7.5},
