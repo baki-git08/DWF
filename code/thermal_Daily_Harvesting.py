@@ -2,9 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import csv
 
-# ============================================================================
 # CONFIGURATION
-# ============================================================================
 
 SEASONS = ['Summer', 'Autumn', 'Winter', 'Spring']
 
@@ -60,9 +58,7 @@ TECHNOLOGIES = {
 }
 
 
-# ============================================================================
 # TEMPERATURE MODEL
-# ============================================================================
 
 def surface_temp_at_hour(hour, season, noise_level=0.05, seed=42):
 
@@ -87,9 +83,7 @@ def temperature_difference(surface_temp, deep_temp=DEEP_TEMP):
     return max(0, surface_temp - deep_temp)
 
 
-# ============================================================================
 # POWER CURVE
-# ============================================================================
 
 def power_output(delta_T, tech_key):
     p = TECHNOLOGIES[tech_key]
@@ -104,9 +98,7 @@ def power_output(delta_T, tech_key):
     return min(power, p['rated_power'])
 
 
-# ============================================================================
 # SECTION 1: TEMPERATURE GRADIENT FOR EACH SEASON (HOURLY)
-# ============================================================================
 
 def section_1_temperatures():
     print("\n" + "=" * 110)
@@ -159,9 +151,7 @@ def section_1_temperatures():
     return temp_data, delta_data
 
 
-# ============================================================================
 # SECTION 2: POWER GENERATION FOR EACH TECHNOLOGY (HOURLY)
-# ============================================================================
 
 def section_2_power_by_technology(delta_data):
     """For each technology, show hourly power for all four seasons."""
@@ -206,9 +196,7 @@ def section_2_power_by_technology(delta_data):
     return all_results
 
 
-# ============================================================================
 # SECTION 3: CUMULATIVE ENERGY
-# ============================================================================
 
 def section_3_cumulative(all_results):
     print("\n" + "=" * 110)
@@ -242,9 +230,7 @@ def section_3_cumulative(all_results):
               f"{cumulative['Spring'][-1]:>10.4f}")
 
 
-# ============================================================================
 # SECTION 4: SUMMER FOCUS — ALL TECHNOLOGIES COMPARED
-# ============================================================================
 
 def section_4_summer_focus(all_results, delta_data):
     print("\n" + "=" * 110)
@@ -299,9 +285,7 @@ def section_4_summer_focus(all_results, delta_data):
               f"{daily_kj:>10.4f}")
 
 
-# ============================================================================
 # SECTION 5: PLOTTING
-# ============================================================================
 
 def section_5_plots(temp_data, delta_data, all_results):
     fig, axes = plt.subplots(2, 2, figsize=(16, 10))
@@ -382,9 +366,7 @@ def section_5_plots(temp_data, delta_data, all_results):
 
 
 
-# ============================================================================
 # MAIN
-# ============================================================================
 
 if __name__ == "__main__":
     

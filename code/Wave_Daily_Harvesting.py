@@ -1,10 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import csv
 
-# ============================================================================
 # CONFIGURATION
-# ============================================================================
 
 SEASONS = ['Summer', 'Autumn', 'Winter', 'Spring']
 
@@ -56,9 +53,7 @@ TECHNOLOGIES = {
 }
 
 
-# ============================================================================
 # WAVE HEIGHT MODEL
-# ============================================================================
 
 def wave_height_at_hour(hour, season, noise_level=0.12, seed=42):
     np.random.seed(seed + hour + hash(season) % 1000)
@@ -82,9 +77,7 @@ def generate_wave_heights(season, seed=42):
     return [wave_height_at_hour(h, season, seed=seed) for h in range(24)]
 
 
-# ============================================================================
 # POWER CURVE
-# ============================================================================
 
 def power_output(wave_height, tech_key):
     p = TECHNOLOGIES[tech_key]
@@ -98,9 +91,7 @@ def power_output(wave_height, tech_key):
     return p['rated_power']
 
 
-# ============================================================================
 # SECTION 1: WAVE HEIGHT FOR EACH SEASON (HOURLY)
-# ============================================================================
 
 def section_1_wave_heights():
     """Compare wave height across all four seasons, hour by hour."""
@@ -139,9 +130,7 @@ def section_1_wave_heights():
     return wave_data
 
 
-# ============================================================================
 # SECTION 2: POWER GENERATION FOR EACH TECHNOLOGY (HOURLY)
-# ============================================================================
 
 def section_2_power_by_technology():
     """For each technology, show hourly power for all four seasons."""
@@ -192,9 +181,7 @@ def section_2_power_by_technology():
     return all_results
 
 
-# ============================================================================
 # SECTION 3: CUMULATIVE ENERGY
-# ============================================================================
 
 def section_3_cumulative(all_results):
     """Show cumulative energy across the day for each technology."""
@@ -233,9 +220,7 @@ def section_3_cumulative(all_results):
               f"{cumulative['Spring'][-1]:>10.1f}")
 
 
-# ============================================================================
 # SECTION 4: WINTER FOCUS — ALL TECHNOLOGIES COMPARED
-# ============================================================================
 
 def section_4_winter_focus(all_results):
     """Focus on Winter and compare all technologies hour by hour."""
@@ -305,9 +290,7 @@ def section_4_winter_focus(all_results):
               f"{daily_kj:>10.1f} | {status:<15}")
 
 
-# ============================================================================
 # SECTION 5: PLOTTING
-# ============================================================================
 
 def section_5_plots(wave_data, all_results):
     """Generate plots for all sections."""
@@ -390,9 +373,7 @@ def section_5_plots(wave_data, all_results):
     plt.show()
 
 
-# ============================================================================
 # MAIN
-# ============================================================================
 
 if __name__ == "__main__":
     
@@ -415,9 +396,6 @@ if __name__ == "__main__":
     
     # Section 5: Plots
     section_5_plots(wave_data, all_results)
-    
-    # Section 6: CSV export
-    section_6_export(wave_data, all_results)
     
     print("\n" + "=" * 110)
     print("✅ COMPLETE")
