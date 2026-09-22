@@ -1,18 +1,3 @@
-"""
-DWF + 5 m² SOLAR INTEGRATION — MASTER NODE
-============================================
-
-Master: surface buoy with a 5 m² solar panel (5 m × 1 m)
-Harvest window: 1–5 hours around solar noon
-Battery: stores harvested energy
-DWF: allocates energy forward in time (causality-respecting)
-
-Reference loads:
-    - Slave daily load     ≈ 17 kJ/day
-    - Master own load      ≈ 92 kJ/day
-    - THz burst            = 11.7 J = 0.0117 kJ
-"""
-
 import numpy as np
 import matplotlib.pyplot as plt
 import csv
@@ -50,7 +35,6 @@ INITIAL_BATTERY_KJ = 0.0
 # =============================================================================
 
 def compute_initial_power(E, L):
-    """P[i] = E[i] / L[i] for each block (use all energy immediately)."""
     E = np.asarray(E, dtype=float)
     L = np.asarray(L, dtype=float)
     P = np.zeros_like(E)
@@ -61,13 +45,6 @@ def compute_initial_power(E, L):
 
 
 def directional_water_filling(E, L):
-    """
-    Forward-only directional water-filling.
-
-    E : harvested energy per block (kJ)
-    L : duration of each block (hours)
-    Returns P : allocated power per block (kJ/h)
-    """
     E = np.asarray(E, dtype=float)
     L = np.asarray(L, dtype=float)
     P = compute_initial_power(E, L)
@@ -78,7 +55,6 @@ def directional_water_filling(E, L):
         changed = False
         for i in range(N - 1):
             if P[i] > P[i + 1]:
-                # Energy can flow from block i to block i+1
                 start, end = i, i + 1
                 while start > 0 and P[start - 1] >= P[start]:
                     start -= 1
@@ -92,7 +68,6 @@ def directional_water_filling(E, L):
 
 
 def battery_profile(P, E, L, B_init=0.0):
-    """Battery level (kJ) after each block."""
     B = np.zeros(len(E))
     b = B_init
     for i in range(len(E)):
@@ -101,18 +76,8 @@ def battery_profile(P, E, L, B_init=0.0):
     return B
 
 
-# =============================================================================
-# SOLAR → DWF BRIDGE
-# =============================================================================
-
 def build_master_schedule(season, harvest_hours,
                           B_init=INITIAL_BATTERY_KJ):
-    """
-    Build a full 24-hour Master schedule:
-      1. Harvest solar energy during `harvest_hours`
-      2. Apply DWF to allocate energy forward
-      3. Track battery level
-    """
     harvester = MinuteSolarHarvester(
         panel_width_m=PANEL_WIDTH_M,
         panel_height_m=PANEL_HEIGHT_M,
@@ -124,7 +89,6 @@ def build_master_schedule(season, harvest_hours,
 
     info = harvester.seasons[season]
 
-    # --- Harvest only during the specified window ---
     E = np.zeros(24)
     for h in harvest_hours:
         res = harvester.harvest_minute_hour(
@@ -158,9 +122,7 @@ def build_master_schedule(season, harvest_hours,
     }
 
 
-# =============================================================================
 # PRINTING
-# =============================================================================
 
 def print_summary_table(season, results):
     print(f"\n{'=' * 110}")
@@ -215,31 +177,7 @@ def print_detailed_table(r):
               f"{B[h]:>12.2f} | {status:<15}")
 
 
-# =============================================================================
-# CSV EXPORT
-# =============================================================================
-
-def export_csv(all_season_results):
-    filename = 'dwf_solar_schedule.csv'
-    with open(filename, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['Season', 'Scenario', 'Hour',
-                         'Harvested_kJ', 'P_dwf_W', 'Battery_kJ'])
-        for season, results in all_season_results.items():
-            for label, r in results.items():
-                for h in r['hours']:
-                    writer.writerow([
-                        season, label, h,
-                        f"{r['E'][h]:.4f}",
-                        f"{r['P_dwf'][h] / 3.6:.4f}",
-                        f"{r['battery'][h]:.4f}",
-                    ])
-    print(f"✅ Saved: {filename}")
-
-
-# =============================================================================
 # PLOTTING
-# =============================================================================
 
 def plot_season(season, results):
     fig, axes = plt.subplots(2, 2, figsize=(15, 9))
@@ -294,9 +232,7 @@ def plot_season(season, results):
     plt.show()
 
 
-# =============================================================================
 # MAIN
-# =============================================================================
 
 def main():
     print("=" * 110)
@@ -325,9 +261,6 @@ def main():
     print("DETAILED HOURLY BREAKDOWN (Summer, 3h around peak)")
     print("=" * 110)
     print_detailed_table(all_season_results['summer']['3h_around_peak'])
-
-    # CSV
-    export_csv(all_season_results)
 
     # Plots
     for season in SEASONS:
