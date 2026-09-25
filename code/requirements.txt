@@ -1,6 +1,7 @@
 numpy
 pandas
 scikit-learn
-matplotlib
+matplotlib|
+scipy
 # TensorFlow is optional for full LSTM execution and requires Python 3.10-3.12
 # tensorflow

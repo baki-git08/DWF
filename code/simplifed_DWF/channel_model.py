@@ -1,6 +1,6 @@
 import numpy as np
-from DWF_v2 import power
-from evaluation import calculate_total_noise
+from code.DWF.DWF_v2 import power
+from code.simplifed_DWF.evaluation import calculate_total_noise
 
 thz_freq = np.array([0.30, 0.45, 0.48, 0.60, 0.66, 0.90, 0.99, 1.05, 
                      1.26, 1.29, 1.31, 1.40, 1.53, 1.56, 1.83, 1.98, 
