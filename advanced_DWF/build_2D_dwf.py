@@ -128,8 +128,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from build_dwf import Harvested_energy_summer, MasterParams, Harvested_energy_winter 
+from build_dwf import Harvested_energy_summer, MasterParams, Harvested_energy_winter
 from dwf_diagnostics import diagnose
+from physical_chain import optical_to_electrical, OpticalReceiveChainResult
 
 
 # ----------------------------------------------------------------------------
@@ -282,6 +283,81 @@ class JointResult:
     objective: float          # th1*rate_master + th2*rate_slave
     iters: int                # number of sweeps used
     converged: bool           # True if the stop rule (and polish) was met before max_iter
+
+
+@dataclass
+class PhysicalStorageResult:
+    """Physical-layer reality check for the down-tap, computed AFTER joint_dwf() has solved.
+
+    joint_dwf() assumes a constant linear tap gain a_i = beta*alpha_i (module docstring,
+    section 1): "of the delta_i sent, only a_i*delta_i lands in the slave battery". This result
+    reports what the actual photodiode + MPPT receive chain (physical_chain.py) would deliver
+    for that SAME delta schedule, without feeding anything back into the solver.
+
+    Arrays have one entry per slot.
+    """
+    chain: OpticalReceiveChainResult   # photocurrent, Voc, max_electrical_power, mppt_output_power
+    stored_power_phys: np.ndarray      # [W] chain.mppt_output_power -- physically real stored power
+    stored_energy_phys: np.ndarray     # [J] tau * stored_power_phys
+    eff_phys: np.ndarray               # mppt_output_power / arrived_power (NaN where arrived_power = 0)
+    b_phys: np.ndarray                 # [J] slave battery re-simulated with the physical arrivals
+    b_peak_phys: np.ndarray            # [J] battery level right after arrival (physical)
+    floor_violations: int              # slots where b_phys < B_min
+    ceiling_violations: int            # slots where b_peak_phys > B_max
+
+
+def physical_stored_power(
+    jp: "JointParams",
+    r: JointResult,
+    wavelength_nm: float = 532,
+    mppt_efficiency: float = 0.95,
+    fill_factor: float = 0.85,
+    temp_K: float = 300.0,
+) -> PhysicalStorageResult:
+    """Run the solver's delta schedule through the real photodiode+MPPT chain.
+
+    Takes r.arrived_power (alpha*delta/tau, the optical power actually reaching the slave --
+    exactly the "P_transmitted*alpha" input physical_chain.py's optical_to_electrical() expects)
+    and reports the power that chain would really deliver into the battery
+    (chain.mppt_output_power), alongside a re-simulation of the slave battery using that
+    physical arrival instead of the solver's linear a_i*delta_i assumption.
+
+    Pure post-processing: does not modify jp or r, and never feeds back into joint_dwf().
+    """
+    m = jp.master
+    tau = m.tau
+    chain = optical_to_electrical(
+        r.arrived_power, wavelength_nm, mppt_efficiency,
+        fill_factor=fill_factor, temp_K=temp_K,
+    )
+    stored_power_phys = chain.mppt_output_power
+    stored_energy_phys = tau * stored_power_phys
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        eff_phys = np.where(r.arrived_power > 0, stored_power_phys / np.where(r.arrived_power > 0, r.arrived_power, 1.0), np.nan)
+
+    # Re-simulate the slave battery: same spending (tau*Pbar) as the solver's solution, but the
+    # PHYSICAL arrival instead of a_i*delta_i.  Starts at b0 (same initial charge as the solver).
+    tau_pbar = r.Pbar * tau                                       # tau*Pbar_i, the slave's actual spend (unchanged)
+    b_prev_phys = np.empty(m.N)
+    b_phys = np.empty(m.N)
+    level = jp.b0                                                 # running battery level, starts at b0
+    for i in range(m.N):
+        b_prev_phys[i] = level
+        level = level + stored_energy_phys[i] - tau_pbar[i]
+        b_phys[i] = level
+    b_peak_phys = b_prev_phys + stored_energy_phys
+
+    return PhysicalStorageResult(
+        chain=chain,
+        stored_power_phys=stored_power_phys,
+        stored_energy_phys=stored_energy_phys,
+        eff_phys=eff_phys,
+        b_phys=b_phys,
+        b_peak_phys=b_peak_phys,
+        floor_violations=int(np.sum(b_phys < jp.B_min - 1e-9)),
+        ceiling_violations=int(np.sum(b_peak_phys > jp.B_max + 1e-9)),
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -764,135 +840,202 @@ def reference_solution_joint(jp: JointParams):
 
 
 # ----------------------------------------------------------------------------
-# Plot: received power over the channel | transmit power | battery
+# Plots: one panel per figure (each function saves exactly one PNG)
 # ----------------------------------------------------------------------------
 # Categorical slots 1-3 of the reference palette (light surface), fixed order.
 C_MASTER, C_SLAVE, C_LINK = "#2a78d6", "#eb6834", "#1baf7a"
 INK, INK2, GRID = "#0b0b0b", "#52514e", "#e6e5e0"
 
 
-def plot_joint(jp: JointParams, r: JointResult, path: str, title: str = ""):
-    """Draw the three-panel result figure and save it to `path` (PNG).
-
-    Panels (x-axis = slot index, one slot = one minute)
-    ---------------------------------------------------
-    1. Power over the underwater energy link, three stages of the same flow:
-           sent by the master      delta/tau                     (solid)
-           received after channel  alpha*delta/tau               (dashed)  Beer-Lambert loss
-           stored after recharge   beta*alpha*delta/tau = a*delta/tau (dotted)  recharging loss
-    2. Transmit (data) powers:  master P_i = xm/tau  and slave Pbar_i = xs/tau.
-    3. Slave battery: level after each slot b_n = B_min + Gt_n (solid) and level right after
-       each arrival b_{n-1} + a_n delta_n (dashed), with the limits B_min and B_max as dotted lines.
-
-    Colours follow the entity: blue = master, orange = slave, green = the energy link.
-    """
+def _new_axis(figsize=(9.5, 5.0)):
+    """Create a single-panel figure with the shared, low-key styling used by every plot here."""
     import matplotlib
     matplotlib.use("Agg")                                   # draw to a file, no window
     import matplotlib.pyplot as plt
 
-    m, t = jp.master, np.arange(jp.master.N)                # t = slot index 0..N-1
-    fig, ax = plt.subplots(3, 1, figsize=(9.5, 10), sharex=True, facecolor="white")
-    for a_ in ax:                                           # common, low-key styling
-        a_.set_facecolor("white")
-        a_.grid(True, axis="y", color=GRID, lw=0.8)
-        for sp in ("top", "right"):
-            a_.spines[sp].set_visible(False)
-        for sp in ("left", "bottom"):
-            a_.spines[sp].set_color(GRID)
-        a_.tick_params(colors=INK2)
+    fig, ax = plt.subplots(figsize=figsize, facecolor="white")
+    ax.set_facecolor("white")
+    ax.grid(True, axis="y", color=GRID, lw=0.8)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    for sp in ("left", "bottom"):
+        ax.spines[sp].set_color(GRID)
+    ax.tick_params(colors=INK2)
+    return fig, ax
 
-    def label(a_, x, y, text, color_line):
-        """(Unused helper) write a short text label next to a point."""
-        a_.annotate(text, (x, y), xytext=(6, 0), textcoords="offset points",
-                    va="center", fontsize=9, color=INK2)
 
-    # 1) power over the energy channel (same entity, three stages -> one hue, three dashes)
-    ax[0].plot(t, r.sent_power, color=C_LINK, lw=2, ls="-", label="sent by master, δ/τ")
-    ax[0].plot(t, r.arrived_power, color=C_LINK, lw=2, ls="--", label="received after channel, αδ/τ")
-    ax[0].plot(t, r.stored_power, color=C_LINK, lw=2, ls=":", label="stored after recharge, βαδ/τ")
-    ax[0].set_ylabel("power over the energy link [W]")
-    ax[0].set_ylim(bottom=0)
-    ax[0].legend(frameon=False, loc="center right", bbox_to_anchor=(1.0, 0.62), fontsize=9, labelcolor=INK2)
-    ax[0].set_title("Received power over the underwater channel", loc="left", color=INK, fontsize=11)
-
-    # 2) transmit powers
-    ax[1].plot(t, r.P, color=C_MASTER, lw=2, label="master data power P")
-    ax[1].plot(t, r.Pbar, color=C_SLAVE, lw=2, label="slave data power P̄")
-    ax[1].set_ylabel("transmit power [W]")
-    ax[1].set_ylim(bottom=0)
-    ax[1].legend(frameon=False, loc="upper right", fontsize=9, labelcolor=INK2)
-    ax[1].set_title("Transmit power", loc="left", color=INK, fontsize=11)
-
-    # 3) slave battery inside [B_min, B_max]
-    ax[2].plot(t, r.b, color=C_SLAVE, lw=2, label="slave battery after slot")
-    ax[2].plot(t, r.b_peak, color=C_SLAVE, lw=1.2, ls="--", label="slave battery just after arrival")
-    ax[2].axhline(jp.B_max, color=INK2, lw=1, ls=":")       # ceiling B_max (S2)
-    ax[2].axhline(jp.B_min, color=INK2, lw=1, ls=":")       # floor   B_min (S1)
-    ax[2].annotate(f"B_max = {jp.B_max:g} J", (t[-1], jp.B_max), xytext=(0, 5),
-                   textcoords="offset points", ha="right", fontsize=9, color=INK2)
-    ax[2].annotate(f"B_min = {jp.B_min:g} J", (t[-1], jp.B_min), xytext=(0, 5),
-                   textcoords="offset points", ha="right", fontsize=9, color=INK2)
-    ax[2].set_ylim(0, jp.B_max * 1.08)
-    ax[2].set_ylabel("slave battery [J]")
-    ax[2].set_xlabel("slot index (1 slot = 1 min)")
-    ax[2].legend(frameon=False, loc="center right", fontsize=9, labelcolor=INK2)
-    ax[2].set_title("Slave battery level", loc="left", color=INK, fontsize=11)
-
-    if title:
-        fig.suptitle(title, x=0.01, ha="left", color=INK, fontsize=12)
+def _finish(fig, ax, path, title, suptitle):
+    """Common finishing touches: title, x-label, layout, save."""
+    ax.set_xlabel("slot index (1 slot = 1 min)")
+    ax.set_title(title, loc="left", color=INK, fontsize=11)
+    if suptitle:
+        fig.suptitle(suptitle, x=0.01, ha="left", color=INK, fontsize=12)
     fig.tight_layout()
     fig.savefig(path, dpi=140)
+    import matplotlib.pyplot as plt
     plt.close(fig)
 
 
-def plot_throughput(jp: JointParams, r: JointResult, path: str, title: str = ""):
-    """Draw the per-slot and cumulative throughput (data rate) of master and slave.
+def plot_link_power(jp: JointParams, r: JointResult, path: str, title: str = ""):
+    """Power over the underwater energy link, three stages of the same flow.
 
-    Instantaneous throughput per slot [nats]:
+        sent by the master      delta/tau                          (solid)
+        received after channel  alpha*delta/tau                    (dashed)  Beer-Lambert loss
+        stored after recharge   beta*alpha*delta/tau = a*delta/tau (dotted)  recharging loss
+    """
+    t = np.arange(jp.master.N)
+    fig, ax = _new_axis()
+    ax.plot(t, r.sent_power, color=C_LINK, lw=2, ls="-", label="sent by master, δ/τ")
+    ax.plot(t, r.arrived_power, color=C_LINK, lw=2, ls="--", label="received after channel, αδ/τ")
+    ax.plot(t, r.stored_power, color=C_LINK, lw=2, ls=":", label="stored after recharge, βαδ/τ")
+    ax.set_ylabel("power over the energy link [W]")
+    ax.set_ylim(bottom=0)
+    ax.legend(frameon=False, loc="upper right", fontsize=9, labelcolor=INK2)
+    _finish(fig, ax, path, "Power over the underwater energy link", title)
+
+
+def plot_transmit_power(jp: JointParams, r: JointResult, path: str, title: str = ""):
+    """Transmit (data) powers: master P_i = xm/tau and slave Pbar_i = xs/tau."""
+    t = np.arange(jp.master.N)
+    fig, ax = _new_axis()
+    ax.plot(t, r.P, color=C_MASTER, lw=2, label="master data power P")
+    ax.plot(t, r.Pbar, color=C_SLAVE, lw=2, label="slave data power P̄")
+    ax.set_ylabel("transmit power [W]")
+    ax.set_ylim(bottom=0)
+    ax.legend(frameon=False, loc="upper right", fontsize=9, labelcolor=INK2)
+    _finish(fig, ax, path, "Transmit power (master vs slave)", title)
+
+
+def plot_slave_battery(jp: JointParams, r: JointResult, path: str, title: str = ""):
+    """Slave battery level after each slot b_n = B_min + Gt_n (solid) and level right after
+    each arrival b_{n-1} + a_n delta_n (dashed), with the limits B_min and B_max as dotted lines.
+    """
+    t = np.arange(jp.master.N)
+    fig, ax = _new_axis()
+    ax.plot(t, r.b, color=C_SLAVE, lw=2, label="slave battery after slot")
+    ax.plot(t, r.b_peak, color=C_SLAVE, lw=1.2, ls="--", label="slave battery just after arrival")
+    ax.axhline(jp.B_max, color=INK2, lw=1, ls=":")          # ceiling B_max (S2)
+    ax.axhline(jp.B_min, color=INK2, lw=1, ls=":")          # floor   B_min (S1)
+    ax.annotate(f"B_max = {jp.B_max:g} J", (t[-1], jp.B_max), xytext=(0, 5),
+                textcoords="offset points", ha="right", fontsize=9, color=INK2)
+    ax.annotate(f"B_min = {jp.B_min:g} J", (t[-1], jp.B_min), xytext=(0, 5),
+                textcoords="offset points", ha="right", fontsize=9, color=INK2)
+    ax.set_ylim(0, jp.B_max * 1.08)
+    ax.set_ylabel("slave battery [J]")
+    ax.legend(frameon=False, loc="center right", fontsize=9, labelcolor=INK2)
+    _finish(fig, ax, path, "Slave battery level", title)
+
+
+def plot_throughput_per_slot(jp: JointParams, r: JointResult, path: str, title: str = ""):
+    """Instantaneous throughput per slot [nats]:
         master  rate_i = (tau/2) ln(1 + h_i    P_i)
         slave   rate_i = (tau/2) ln(1 + hbar_i Pbar_i)
-    These are the per-slot terms that sum to r.rate_master / r.rate_slave (section 1 objective,
-    unweighted by theta1/theta2). Panel 1 shows them per slot; panel 2 shows the running total
-    (cumulative sum), i.e. data delivered so far.
+    These are the per-slot terms that sum to r.rate_master / r.rate_slave (module docstring,
+    section 1 objective, unweighted by theta1/theta2).
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     m, t = jp.master, np.arange(jp.master.N)
-    rate_m = 0.5 * m.tau * np.log1p(m.h * r.P)          # per-slot master throughput [nats]
-    rate_s = 0.5 * m.tau * np.log1p(jp.h_bar * r.Pbar)  # per-slot slave  throughput [nats]
+    rate_m = 0.5 * m.tau * np.log1p(m.h * r.P)
+    rate_s = 0.5 * m.tau * np.log1p(jp.h_bar * r.Pbar)
+    fig, ax = _new_axis()
+    ax.plot(t, rate_m, color=C_MASTER, lw=2, label="master throughput")
+    ax.plot(t, rate_s, color=C_SLAVE, lw=2, label="slave throughput")
+    ax.set_ylabel("throughput per slot [nats]")
+    ax.set_ylim(bottom=0)
+    ax.legend(frameon=False, loc="upper right", fontsize=9, labelcolor=INK2)
+    _finish(fig, ax, path, "Per-slot throughput", title)
 
-    fig, ax = plt.subplots(2, 1, figsize=(9.5, 7), sharex=True, facecolor="white")
-    for a_ in ax:
-        a_.set_facecolor("white")
-        a_.grid(True, axis="y", color=GRID, lw=0.8)
-        for sp in ("top", "right"):
-            a_.spines[sp].set_visible(False)
-        for sp in ("left", "bottom"):
-            a_.spines[sp].set_color(GRID)
-        a_.tick_params(colors=INK2)
 
-    ax[0].plot(t, rate_m, color=C_MASTER, lw=2, label="master throughput")
-    ax[0].plot(t, rate_s, color=C_SLAVE, lw=2, label="slave throughput")
-    ax[0].set_ylabel("throughput per slot [nats]")
-    ax[0].set_ylim(bottom=0)
-    ax[0].legend(frameon=False, loc="upper right", fontsize=9, labelcolor=INK2)
-    ax[0].set_title("Per-slot throughput", loc="left", color=INK, fontsize=11)
+def plot_throughput_cumulative(jp: JointParams, r: JointResult, path: str, title: str = ""):
+    """Running total (cumulative sum) of the per-slot throughput, i.e. data delivered so far."""
+    m, t = jp.master, np.arange(jp.master.N)
+    rate_m = 0.5 * m.tau * np.log1p(m.h * r.P)
+    rate_s = 0.5 * m.tau * np.log1p(jp.h_bar * r.Pbar)
+    fig, ax = _new_axis()
+    ax.plot(t, np.cumsum(rate_m), color=C_MASTER, lw=2, label=f"master total = {r.rate_master:.3f} nats")
+    ax.plot(t, np.cumsum(rate_s), color=C_SLAVE, lw=2, label=f"slave total = {r.rate_slave:.3f} nats")
+    ax.set_ylabel("cumulative throughput [nats]")
+    ax.set_ylim(bottom=0)
+    ax.legend(frameon=False, loc="upper left", fontsize=9, labelcolor=INK2)
+    _finish(fig, ax, path, "Cumulative throughput", title)
 
-    ax[1].plot(t, np.cumsum(rate_m), color=C_MASTER, lw=2, label=f"master total = {r.rate_master:.3f} nats")
-    ax[1].plot(t, np.cumsum(rate_s), color=C_SLAVE, lw=2, label=f"slave total = {r.rate_slave:.3f} nats")
-    ax[1].set_ylabel("cumulative throughput [nats]")
-    ax[1].set_xlabel("slot index (1 slot = 1 min)")
-    ax[1].set_ylim(bottom=0)
-    ax[1].legend(frameon=False, loc="upper left", fontsize=9, labelcolor=INK2)
-    ax[1].set_title("Cumulative throughput", loc="left", color=INK, fontsize=11)
 
-    if title:
-        fig.suptitle(title, x=0.01, ha="left", color=INK, fontsize=12)
-    fig.tight_layout()
-    fig.savefig(path, dpi=140)
-    plt.close(fig)
+def plot_harvested_energy(jp: JointParams, r: JointResult, path: str, title: str = ""):
+    """Energy the master harvests per slot, E_i. Kept on its own axis because it is normally
+    one to three orders of magnitude larger than the sharing quantities (see plot_sharing_energy),
+    so mixing them on one axis flattens the sharing curves to the baseline.
+    """
+    m, t = jp.master, np.arange(jp.master.N)
+    fig, ax = _new_axis()
+    ax.plot(t, m.E, color=INK2, lw=2, label="harvested by master, E")
+    ax.set_ylabel("energy per slot [J]")
+    ax.set_ylim(bottom=0)
+    ax.legend(frameon=False, loc="upper right", fontsize=9, labelcolor=INK2)
+    _finish(fig, ax, path, "Energy harvested by the master", title)
+
+
+def plot_sharing_energy(jp: JointParams, r: JointResult, path: str, title: str = ""):
+    """Per-slot energy balance of the master->slave sharing act (Joules, own scale).
+
+        slave gain       a_i * delta_i           energy that lands in the slave battery
+        master loss      delta_i                 energy the master gives up to send it
+        net difference   a_i*delta_i - delta_i   gain minus loss of the sharing act itself
+                                                  (<=0 always, since a_i < 1: every Joule sent
+                                                  loses (1-a_i) of itself to the channel/battery
+                                                  losses; it is the price of moving energy to a
+                                                  node that cannot harvest on its own)
+    """
+    t = np.arange(jp.master.N)
+    slave_gain = jp.a * r.delta           # a_i * delta_i
+    master_loss = r.delta                 # delta_i
+    net = slave_gain - master_loss        # <= 0
+
+    fig, ax = _new_axis()
+    ax.plot(t, slave_gain, color=C_SLAVE, lw=2, label="slave gain, a·δ")
+    ax.plot(t, master_loss, color=C_MASTER, lw=2, label="master loss, δ")
+    ax.plot(t, net, color=C_LINK, lw=2, ls="--", label="net difference, a·δ − δ")
+    ax.axhline(0, color=GRID, lw=1)
+    ax.set_ylabel("energy per slot [J]")
+    ax.legend(frameon=False, loc="upper right", fontsize=9, labelcolor=INK2)
+    _finish(fig, ax, path, "Energy balance of sharing (slave gain, master loss, net)", title)
+
+
+def plot_physical_stored_power(jp: JointParams, r: JointResult, ph: PhysicalStorageResult,
+                                path: str, title: str = ""):
+    """Solver assumption vs physical reality for the power that ends up in the slave battery.
+
+        arrived optical power    alpha*delta/tau                (dashed)  reaches the photodiode
+        solver-assumed stored    beta*alpha*delta/tau            (dotted)  joint_dwf()'s linear a_i model
+        physical MPPT output     chain.mppt_output_power         (solid)   photodiode + MPPT, physical_chain.py
+    """
+    t = np.arange(jp.master.N)
+    fig, ax = _new_axis()
+    ax.plot(t, r.arrived_power, color=C_LINK, lw=2, ls="--", label="arrived optical, αδ/τ")
+    ax.plot(t, r.stored_power, color=C_LINK, lw=2, ls=":", label="solver-assumed stored, βαδ/τ")
+    ax.plot(t, ph.stored_power_phys, color=C_SLAVE, lw=2, label="physical MPPT output")
+    ax.set_ylabel("power [W]")
+    ax.set_ylim(bottom=0)
+    ax.legend(frameon=False, loc="upper right", fontsize=9, labelcolor=INK2)
+    _finish(fig, ax, path, "Stored power: solver assumption vs physical receive chain", title)
+
+
+def plot_physical_slave_battery(jp: JointParams, r: JointResult, ph: PhysicalStorageResult,
+                                 path: str, title: str = ""):
+    """Slave battery level per the solver (linear a_i model) vs re-simulated with the physical
+    receive chain's actual arrivals, same B_min/B_max limits as plot_slave_battery.
+    """
+    t = np.arange(jp.master.N)
+    fig, ax = _new_axis()
+    ax.plot(t, r.b, color=C_SLAVE, lw=2, label="slave battery (solver model)")
+    ax.plot(t, ph.b_phys, color=C_MASTER, lw=2, ls="--", label="slave battery (physical chain)")
+    ax.axhline(jp.B_max, color=INK2, lw=1, ls=":")
+    ax.axhline(jp.B_min, color=INK2, lw=1, ls=":")
+    ax.annotate(f"B_max = {jp.B_max:g} J", (t[-1], jp.B_max), xytext=(0, 5),
+                textcoords="offset points", ha="right", fontsize=9, color=INK2)
+    ax.annotate(f"B_min = {jp.B_min:g} J", (t[-1], jp.B_min), xytext=(0, 5),
+                textcoords="offset points", ha="right", fontsize=9, color=INK2)
+    ax.set_ylabel("slave battery [J]")
+    ax.legend(frameon=False, loc="center right", fontsize=9, labelcolor=INK2)
+    _finish(fig, ax, path, "Slave battery: solver model vs physical receive chain", title)
 
 
 # ----------------------------------------------------------------------------
@@ -903,9 +1046,9 @@ if __name__ == "__main__":
     # Test_harvest = np.array([0,12,0])
 
     # Physical link parameters (given by the user)
-    LINK_DISTANCE_M = 0.001              # master<->slave separation [m], shared by both links
+    LINK_DISTANCE_M = 0.0005              # master<->slave separation [m], shared by both links
     FREQ_THZ = 0.30                      # THz operating frequency chosen for the data link
-    OPTICAL_ATTEN_450NM = 0.0399         # Beer-Lambert c [1/m], 450 nm (blue) light in water
+    OPTICAL_ATTEN_450NM = 0.046         # Beer-Lambert c [1/m], 450 nm (blue) light in water
 
     # THz data link: symmetric, so the same gain is used for master->x and slave->master
     h_thz = thz_gain(FREQ_THZ, LINK_DISTANCE_M)          # h0 = 1.0 (uncalibrated reference)
@@ -915,7 +1058,7 @@ if __name__ == "__main__":
     # 2) slave: alpha = Beer-Lambert transmittance of the 450 nm optical energy link,
     #    beta = 0.8, battery window [200, 5000] J, return data link = same THz channel
     jp = JointParams(master=master, alpha=beer_lambert(OPTICAL_ATTEN_450NM, LINK_DISTANCE_M),
-                     beta=0.5, B_min=20.0, B_max=1700.0, h_bar=h_thz)
+                     beta=0.9, B_min=20.0, B_max=1100.0, h_bar=h_thz)
     r = joint_dwf(jp)                       # solve
     diagnose(jp, r)
     k = check_kkt_joint(jp, r)              # feasibility + delta-condition report
@@ -925,7 +1068,24 @@ if __name__ == "__main__":
           f"shared mean={r.sent_power.mean():.2f} W")
     for key, v in k.items():
         print(f"  {key}: {v}")
-    plot_joint(jp, r, "test_THz_optics_2.png",
-               "Master + slave DWF (THz data link, 450 nm optical energy link)")
-    plot_throughput(jp, r, "throughput_2.png",
-                    "Master + slave throughput (THz data link, 450 nm optical energy link)")
+
+    # Physical-layer reality check (post-solve only; does not feed back into the solver above).
+    ph = physical_stored_power(jp, r, wavelength_nm=450, mppt_efficiency=0.95)
+    print(f"stored energy  solver={r.stored_power.sum()*master.tau:.2f} J   "
+          f"physical={ph.stored_energy_phys.sum():.2f} J")
+    print(f"effective beta  assumed={jp.beta:.3f}   "
+          f"physical mean={np.nanmean(ph.eff_phys):.4f} "
+          f"min={np.nanmin(ph.eff_phys):.4f} max={np.nanmax(ph.eff_phys):.4f}")
+    print(f"physical battery floor_violations={ph.floor_violations}  "
+          f"ceiling_violations={ph.ceiling_violations}")
+
+    caption = "Master + slave DWF (THz data link, 450 nm optical energy link)"
+    plot_link_power(jp, r, "plot_link_power.png", caption)
+    plot_transmit_power(jp, r, "plot_transmit_power.png", caption)
+    plot_slave_battery(jp, r, "plot_slave_battery.png", caption)
+    plot_throughput_per_slot(jp, r, "plot_throughput_per_slot.png", caption)
+    plot_throughput_cumulative(jp, r, "plot_throughput_cumulative.png", caption)
+    plot_harvested_energy(jp, r, "plot_harvested_energy.png", caption)
+    plot_sharing_energy(jp, r, "plot_sharing_energy.png", caption)
+    plot_physical_stored_power(jp, r, ph, "plot_physical_stored_power.png", caption)
+    plot_physical_slave_battery(jp, r, ph, "plot_physical_slave_battery.png", caption)
