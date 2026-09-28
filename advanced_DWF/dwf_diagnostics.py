@@ -250,7 +250,7 @@ def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None =
     print("1. CHANNEL CONDITIONS  (optical energy link, master -> slave)")
     print(line)
     print(f"  alpha (transmittance)  : {_rng(alpha)}   -> {-ch['alpha_dB']:.3g} dB channel loss")
-    print(f"  beta  (recharge eff.)  : {beta:.4g}          -> {-float(_dB(beta)):.3g} dB recharge loss")
+    print(f"  beta  (recharge eff.)  : {_rng(beta)}          -> {-float(_dB(np.mean(beta))):.3g} dB recharge loss (mean)")
     print(f"  a = beta*alpha         : {_rng(a)}   -> net tap loss {-ch['a_dB']:.3g} dB")
     print(f"  per Joule sent         : {100 * ch['per_joule_channel_loss']:.2f}% lost in the channel, "
           f"{100 * ch['per_joule_recharge_loss']:.2f}% lost in recharging, {100 * ch['per_joule_stored']:.2f}% stored")

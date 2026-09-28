@@ -124,6 +124,7 @@ Moves (k = current slot):
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -177,7 +178,7 @@ def thz_absorption(freq_thz: float | np.ndarray) -> np.ndarray:
     return np.interp(np.asarray(freq_thz, dtype=float), thz_freq, thz_alpha_m)
 
 
-def thz_gain(freq_thz: float | np.ndarray, d: float, h0: float = 1.0) -> np.ndarray:
+def thz_gain(freq_thz: float | np.ndarray, d: float, h0: float = 10.0) -> np.ndarray:
     """THz channel gain over noise (the h used inside ln(1 + h*P)).
 
     Equation:   h = h0 * exp(-alpha_m(freq_thz) * d)
@@ -199,8 +200,10 @@ class JointParams:
         Master-only data from dwf_master.py: harvest E_i, master capacity E_max (np.inf allowed),
         slot length tau, master link gain h_i.
     alpha : Beer-Lambert transmittance alpha_i (scalar or per-slot).   [PLACEHOLDER: exp(-0.2*5)]
-    beta : battery-recharging efficiency in [0, 1].                     [PLACEHOLDER 0.8]
+    beta : battery-recharging efficiency in [0, 1] (scalar or per-slot).  [PLACEHOLDER 0.8]
         Only a_i*delta_i = beta*alpha_i*delta_i of the shared energy ends up in the slave battery.
+        Per-slot beta lets solve_with_physical_chain() calibrate it against the real photodiode+
+        MPPT chain (physical_chain.py) without changing joint_dwf() itself.
     B_min, B_max : slave battery floor / ceiling [J]  (given: 200 and 5000).
         Battery level always satisfies  B_min <= b_n  and  b_{n-1} + a_n*delta_n <= B_max.
     b0 : initial slave battery level [J]. Default (None) = B_min, i.e. the reserve is already
@@ -210,19 +213,20 @@ class JointParams:
     """
     master: MasterParams
     alpha: np.ndarray | float = 0.368     # PLACEHOLDER  exp(-0.2 1/m * 5 m)
-    beta: float = 0.8                     # PLACEHOLDER  recharging efficiency
+    beta: np.ndarray | float = 0.8        # PLACEHOLDER  recharging efficiency (scalar or per-slot)
     B_min: float = 200.0                  # given
     B_max: float = 5000.0                 # given
     b0: float | None = None               # initial slave charge; default = B_min (ASSUMPTION)
     h_bar: np.ndarray | float = 0.1       # PLACEHOLDER  slave -> master link gain (SNR per W)
     theta1: float = 1.0                   # weight of master rate
-    theta2: float = 1.0                   # weight of slave rate
+    theta2: float = 3.0                   # weight of slave rate
 
     def __post_init__(self):
         """Broadcast scalars to one value per slot and validate the model assumptions."""
         n = self.master.N
-        # alpha_i and hbar_i may be given as scalars; the solver needs one value per slot.
+        # alpha_i, beta_i and hbar_i may be given as scalars; the solver needs one value per slot.
         self.alpha = np.broadcast_to(np.asarray(self.alpha, float), (n,)).copy()
+        self.beta = np.broadcast_to(np.asarray(self.beta, float), (n,)).copy()
         self.h_bar = np.broadcast_to(np.asarray(self.h_bar, float), (n,)).copy()
         # Default initial charge: start exactly at the floor (no usable energy yet).
         if self.b0 is None:
@@ -233,7 +237,7 @@ class JointParams:
         if not (self.B_min <= self.b0 <= self.B_max):
             raise ValueError("need B_min <= b0 <= B_max")
         # alpha and beta are fractions (losses), hbar must give a valid log-rate.
-        if np.any((self.alpha < 0) | (self.alpha > 1)) or not (0 <= self.beta <= 1):
+        if np.any((self.alpha < 0) | (self.alpha > 1)) or np.any((self.beta < 0) | (self.beta > 1)):
             raise ValueError("alpha and beta must be in [0, 1]")
         if np.any(self.h_bar <= 0):
             raise ValueError("h_bar must be > 0")
@@ -302,6 +306,8 @@ class PhysicalStorageResult:
     eff_phys: np.ndarray               # mppt_output_power / arrived_power (NaN where arrived_power = 0)
     b_phys: np.ndarray                 # [J] slave battery re-simulated with the physical arrivals
     b_peak_phys: np.ndarray            # [J] battery level right after arrival (physical)
+    overflow: np.ndarray               # [J] per slot energy above B_max that a real battery would reject
+    overflow_energy: float             # [J] sum(overflow); ~0 once beta is calibrated to the chain
     floor_violations: int              # slots where b_phys < B_min
     ceiling_violations: int            # slots where b_peak_phys > B_max
 
@@ -311,8 +317,9 @@ def physical_stored_power(
     r: JointResult,
     wavelength_nm: float = 532,
     mppt_efficiency: float = 0.95,
-    fill_factor: float = 0.85,
+    fill_factor: float = 1.0,
     temp_K: float = 300.0,
+    battery_tol_J: float = 1e-6,
 ) -> PhysicalStorageResult:
     """Run the solver's delta schedule through the real photodiode+MPPT chain.
 
@@ -323,6 +330,14 @@ def physical_stored_power(
     physical arrival instead of the solver's linear a_i*delta_i assumption.
 
     Pure post-processing: does not modify jp or r, and never feeds back into joint_dwf().
+
+    battery_tol_J : numerical tolerance [J] used for the overflow clip and the floor/ceiling
+        violation counts below. joint_dwf() only converges to within `tol * scale` (its own `tol`
+        argument, default 1e-10 * mean harvested energy per slot) -- typically ~1e-7 to 1e-6 J at
+        the energy scales this model runs at -- so slots that sit exactly ON a bound (common: S1/
+        S2 are frequently active) will show a residual of about that size even at an exact beta
+        calibration. This must stay looser than that residual, or every such slot reads as a false
+        "violation" instead of a real infeasibility.
     """
     m = jp.master
     tau = m.tau
@@ -341,10 +356,14 @@ def physical_stored_power(
     tau_pbar = r.Pbar * tau                                       # tau*Pbar_i, the slave's actual spend (unchanged)
     b_prev_phys = np.empty(m.N)
     b_phys = np.empty(m.N)
+    overflow = np.zeros(m.N)
     level = jp.b0                                                 # running battery level, starts at b0
     for i in range(m.N):
         b_prev_phys[i] = level
         level = level + stored_energy_phys[i] - tau_pbar[i]
+        if level > jp.B_max + battery_tol_J:                      # a real battery can't hold more than B_max
+            overflow[i] = level - jp.B_max
+            level = jp.B_max
         b_phys[i] = level
     b_peak_phys = b_prev_phys + stored_energy_phys
 
@@ -355,9 +374,58 @@ def physical_stored_power(
         eff_phys=eff_phys,
         b_phys=b_phys,
         b_peak_phys=b_peak_phys,
-        floor_violations=int(np.sum(b_phys < jp.B_min - 1e-9)),
-        ceiling_violations=int(np.sum(b_peak_phys > jp.B_max + 1e-9)),
+        overflow=overflow,
+        overflow_energy=float(overflow.sum()),
+        floor_violations=int(np.sum(b_phys < jp.B_min - battery_tol_J)),
+        ceiling_violations=int(np.sum(b_peak_phys > jp.B_max + battery_tol_J)),
     )
+
+
+def solve_with_physical_chain(
+    jp: JointParams,
+    wavelength_nm: float = 532,
+    mppt_efficiency: float = 0.95,
+    fill_factor: float = 1.0,
+    temp_K: float = 300.0,
+    tol: float = 1e-3,
+    max_outer: int = 30,
+):
+    """Fixed-point calibration: re-solve joint_dwf() with a per-slot beta equal to the real
+    photodiode+MPPT chain's secant gain, until beta stops changing. joint_dwf() itself is never
+    modified -- see Instructions.md, Option B, for the full derivation.
+
+    Why this works: the down tap's real gain is eff_i = mppt_output_power_i / arrived_power_i.
+    It is not perfectly constant (the chain is nonlinear), but it varies only slightly with the
+    operating point here, so feeding it back in as beta_i and re-solving converges in a handful
+    of iterations. At the fixed point, a_i*delta_i/tau == mppt_output_power_i exactly, so the
+    solver's battery (r.b, r.b_peak) matches the physically re-simulated one (ph.b_phys,
+    ph.b_peak_phys), and the existing B_min/B_max constraints are enforced against real energy.
+
+    Slots with delta_i == 0 have nothing to calibrate on (arrived_power_i == 0 -> eff_phys_i is
+    NaN); their beta is left unchanged from the previous iterate.
+
+    Returns (jp_calibrated, r, ph, n_outer):
+        jp_calibrated : JointParams with the converged per-slot beta
+        r             : final JointResult from joint_dwf(jp_calibrated)
+        ph            : final PhysicalStorageResult (ph.b_phys should equal r.b to `tol`)
+        n_outer       : number of outer iterations used
+    """
+    beta = np.broadcast_to(np.asarray(jp.beta, float), (jp.master.N,)).copy()
+    jp_i = jp
+    r = None
+    ph = None
+    for n_outer in range(1, max_outer + 1):
+        jp_i = dataclasses.replace(jp, beta=beta.copy())
+        r = joint_dwf(jp_i)
+        ph = physical_stored_power(jp_i, r, wavelength_nm, mppt_efficiency, fill_factor, temp_K)
+        on = r.delta > 1e-9 * max(jp.master.E.mean(), 1.0)         # only calibrate where energy actually moves
+        beta_new = beta.copy()
+        beta_new[on] = ph.eff_phys[on]
+        moved = float(np.max(np.abs(beta_new - beta))) if np.any(on) else 0.0
+        beta = beta_new
+        if moved < tol:
+            break
+    return jp_i, r, ph, n_outer
 
 
 # ----------------------------------------------------------------------------
@@ -1057,9 +1125,12 @@ if __name__ == "__main__":
     master = MasterParams(E=Harvested_energy_winter, E_max=np.inf, tau=60.0, h=h_thz)
     # 2) slave: alpha = Beer-Lambert transmittance of the 450 nm optical energy link,
     #    beta = 0.8, battery window [200, 5000] J, return data link = same THz channel
-    jp = JointParams(master=master, alpha=beer_lambert(OPTICAL_ATTEN_450NM, LINK_DISTANCE_M),
-                     beta=0.9, B_min=20.0, B_max=1100.0, h_bar=h_thz)
-    r = joint_dwf(jp)                       # solve
+    jp0 = JointParams(master=master, alpha=beer_lambert(OPTICAL_ATTEN_450NM, LINK_DISTANCE_M),
+                      beta=0.4, B_min=200.0, B_max=3000.0, h_bar=h_thz)
+
+    # Calibrate beta_i against the real photodiode+MPPT chain (Option B, Instructions.md), then
+    # solve with it. joint_dwf() itself is unmodified; only jp.beta becomes per-slot and real.
+    jp, r, ph, n_outer = solve_with_physical_chain(jp0, wavelength_nm=532, mppt_efficiency=0.95)
     diagnose(jp, r)
     k = check_kkt_joint(jp, r)              # feasibility + delta-condition report
     print(f"iters={r.iters} converged={r.converged}")
@@ -1069,15 +1140,14 @@ if __name__ == "__main__":
     for key, v in k.items():
         print(f"  {key}: {v}")
 
-    # Physical-layer reality check (post-solve only; does not feed back into the solver above).
-    ph = physical_stored_power(jp, r, wavelength_nm=450, mppt_efficiency=0.95)
+    # Calibration diagnostics: the solver's battery should now equal the physical one.
+    print(f"calibration outer iters = {n_outer}, beta range = "
+          f"[{jp.beta.min():.4f}, {jp.beta.max():.4f}]")
+    print(f"max |solver battery - physical battery| = {np.max(np.abs(r.b - ph.b_phys)):.3e} J")
     print(f"stored energy  solver={r.stored_power.sum()*master.tau:.2f} J   "
           f"physical={ph.stored_energy_phys.sum():.2f} J")
-    print(f"effective beta  assumed={jp.beta:.3f}   "
-          f"physical mean={np.nanmean(ph.eff_phys):.4f} "
-          f"min={np.nanmin(ph.eff_phys):.4f} max={np.nanmax(ph.eff_phys):.4f}")
     print(f"physical battery floor_violations={ph.floor_violations}  "
-          f"ceiling_violations={ph.ceiling_violations}")
+          f"ceiling_violations={ph.ceiling_violations}  overflow_energy={ph.overflow_energy:.3e} J")
 
     caption = "Master + slave DWF (THz data link, 450 nm optical energy link)"
     plot_link_power(jp, r, "plot_link_power.png", caption)
