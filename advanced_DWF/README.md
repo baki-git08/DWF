@@ -26,7 +26,9 @@ Build, step by step, a **directional water-filling (DWF)** power/energy-sharing 
   these swapped; the user did not object to using the paper's convention.
 
 The work has been done in stages: (1) master alone, (2) master + energy sharing `delta`, (3) master +
-slave with a finite battery window. Stage 3 is the current state.
+slave with a finite battery window, (4) slave **transmission schedule** (the slave may only send data in
+some slots) and a **physical receive-chain calibration** of the down tap (photodiode/GaAs cell + MPPT).
+Stage 4 is the current state; `joint_dwf()` stays the single solver for all of it.
 
 ---------------------------------------------------------------------------------------------
 
@@ -35,18 +37,22 @@ slave with a finite battery window. Stage 3 is the current state.
 | File | What it is |
 |---|---|
 | `build_dwf.py` | Stage 1: master-only DWF. `MasterParams`, `directional_water_filling`, `check_kkt`, `reference_solution` (scipy), `plot_result`. Holds `Harvested_energy_summer` and `Harvested_energy_winter` (60 samples, J per 1-minute slot). |
-| `build_2D_dwf.py` | Stage 3: joint master + slave DWF. Imports `Harvested_energy_summer`/`Harvested_energy_winter` and `MasterParams` from `build_dwf.py`, and `diagnose` from `dwf_diagnostics.py`. Fully commented (module docstring is a reading guide). |
-| `plot_link_power.png`, `plot_transmit_power.png`, `plot_slave_battery.png`, `plot_throughput_per_slot.png`, `plot_throughput_cumulative.png`, `plot_harvested_energy.png`, `plot_sharing_energy.png` | Output of the demo: one PNG per panel (see section 4's "Public API" for what each shows). Each function saves exactly one figure, so panels can be read, sized and shared independently. |
+| `build_2D_dwf.py` | Stages 3-4: joint master + slave DWF, slave schedule (S4), physical-chain post-processing and calibration. Imports `Harvested_energy_summer`/`Harvested_energy_winter` and `MasterParams` from `build_dwf.py`, `diagnose` from `dwf_diagnostics.py`, and `optical_to_electrical`, `OpticalReceiveChainResult` from `physical_chain.py`. Fully commented (module docstring is a reading guide). |
+| `physical_chain.py` | Receive side of the optical energy link: optical power at the slave -> GaAs/Ge cell array (Spectrolab datasheet: Voc = 1.025 V, FF = 0.82, QE-derived responsivity at 450/532 nm) -> MPPT -> electrical power into the battery. `optical_to_electrical()`, `photodiode_stage()`, `mppt_stage()`, `size_array_by_intensity()`. Never modifies the solver. |
+| `dwf_diagnostics.py` | `diagnose(jp, r)`: human-readable report (sharing decision, energy ledger, active constraints, solver status). Called by the demo. |
+| `Instructions.md` | Design notes for replacing the linear slave-battery model with the physical chain: Option B (per-slot calibrated `beta`, **implemented**) and Option C (nonlinear tap inside the optimiser, **not implemented**). |
+| `PD cell/` | Datasheets (photodiodes, APD, STM32L010, ODD-5W) used for the receive-chain parameters. |
+| `plot_link_power.png`, `plot_transmit_power.png`, `plot_slave_battery.png`, `plot_throughput_per_slot.png`, `plot_throughput_cumulative.png`, `plot_harvested_energy.png`, `plot_sharing_energy.png`, `plot_physical_stored_power.png`, `plot_physical_slave_battery.png` | Output of the demo: one PNG per panel (see section 4's "Public API" for what each shows). Each function saves exactly one figure, so panels can be read, sized and shared independently. |
 | `dwf_master_inf.png`, `dwf_master_3300.png` | Stage 1 plots (E_max = inf and 3300 J). |
 | Reference papers (PDF, provided by the user) | Gurakan et al., *Energy Cooperation in Energy Harvesting Communications* (2-D DWF, right/down taps); Ozel et al., *Transmission with Energy Harvesting Nodes in Fading Wireless Channels* (and the INFOCOM'11 version); Ozel et al., *Optimal Broadcast Scheduling ... Finite Capacity Battery*; *Sum-rate optimal power policies ... interference channel*. |
 
-`build_dwf.py` must not be modified as a side effect of stage-3 work; stage 3 only imports from it.
+`build_dwf.py` and `physical_chain.py` must not be modified as a side effect of solver work; `build_2D_dwf.py` only imports from them.
 
-Dependencies: `numpy`, `matplotlib` (plots). `cvxpy` (with the CLARABEL solver) only for
+Dependencies: `numpy`, `matplotlib` (plots), plus the local modules above. `cvxpy` (with the CLARABEL solver) only for
 `reference_solution_joint()`, which is a cross-check, not part of the algorithm.
 `scipy` is used by the stage-1 `reference_solution()`.
 
-Run the demo: `cd advanced_DWF && python build_2D_dwf.py` (writes the seven `plot_*.png` files above).
+Run the demo: `cd advanced_DWF && python build_2D_dwf.py` (prints the `diagnose()` report, the KKT and calibration summaries, and writes the nine `plot_*.png` files above).
 
 ---------------------------------------------------------------------------------------------
 
@@ -86,7 +92,15 @@ M3  P_i >= 0, delta_i >= 0                                             [eta_i, r
 S1  b_n >= B_min                           slave floor, end of slot    [lambda_bar_n]
 S2  b_{n-1} + a_n*delta_n <= B_max         slave ceiling, at ARRIVAL   [mu_bar_{n-1}]
 S3  Pbar_i >= 0                                                        [eta_bar_i]
+S4  Pbar_i = 0 in every slot with schedule s_i = 0     (JointParams.slave_schedule)
 ```
+
+**S4 (slave schedule).** `s_i in {0,1}`; a shorter pattern repeats cyclically (`[1,0]` = every other
+slot). A silent slot (`s_i = 0`) still *receives* `delta_i` and stores it; it is a pure pass-through for
+the slave battery (carry in = carry out + arrival). Consequence: energy sent in a silent slot has no local
+marginal value; it is valued at the next transmitting slot, so the interior condition `m_k = a_k s_k` is
+only tested at transmitting slots. The initial excess `b0 - B_min` can only be spent from the first ON
+slot on. Validation: the schedule must be 0/1, and `b0 > B_min` with no ON slot is rejected.
 
 S1 and S2 combine into one two-sided bound on the slave carry:
 `B_min <= b_n <= B_max - a_{n+1}*delta_{n+1}`. The slave's right-tap capacity therefore depends on a
@@ -160,7 +174,8 @@ constraints become bounds: `f >= 0`, `f[k+1] <= capM[k]`, `g >= 0`, `d >= 0`,
 `g[k] + a[k]*d[k] <= W` (slave arrival cap), `xm >= 0`, `xs >= 0`.
 
 ### Start point
-`f = 0`, `g = 0` (except `g[0]`), `d = 0`: "spend what you harvest, share nothing".
+`f = 0`, `g = 0` (except `g[0]`), `d = 0`: "spend what you harvest, share nothing". If the first slots are
+silent (S4), the initial slave excess `g[0]` is carried unchanged up to the first ON slot so the start is feasible.
 
 ### The one equation: `step()`
 
@@ -181,7 +196,12 @@ A clipped move means that constraint is active, i.e. its multiplier is nonzero (
 slackness in code form). **Multipliers are never computed explicitly**; optimality is recognised by
 "no move can improve".
 
-### The nine moves at slot k (all inside `joint_dwf`, in this order)
+### The ten moves at slot k (all inside `joint_dwf`, in this order)
+
+Let `tx[i] = slave_schedule[i]`. Any move whose **slave end** is a silent slot is skipped (that end would
+get `Pbar > 0`): move 1 needs `tx[k]`, 2 needs `tx[k-1]`, 3 and 4 need `tx[k]`, 5 needs `tx[k+1]`, 7 needs
+`tx[k]` and `tx[k+1]`, 9 needs `tx[k-1]` and `tx[k+1]`. Moves 6, 8 and 10 only touch master data energy and
+are never gated.
 
 | # | Path (source -> sink) | Variables that move | Equation enforced |
 |---|---|---|---|
@@ -194,12 +214,16 @@ slackness in code form). **Multipliers are never computed explicitly**; optimali
 | 7 | slave k -> slave k+1 | `g[k+1] += t` | `nubar_k = nubar_{k+1}` |
 | 8 | master k-1 -> master k+1 (carry pass-through) | `f[k] += t`, `f[k+1] += t` | `nu_{k-1} = nu_{k+1}` |
 | 9 | slave k-1 -> slave k+1 (carry pass-through) | `g[k] += t`, `g[k+1] += t` | `nubar_{k-1} = nubar_{k+1}` |
+| 10 | master k -> master k+1 across slave right tap k (delta shift) | `d[k] += t`, `g[k+1] += a_k t`, `d[k+1] -= (a_k/a_{k+1}) t` | `nu_k = nu_{k+1}` (slave spending `xs(k)`, `xs(k+1)` unchanged) |
 
-Moves 1, 6, 7 are the plain equations. Moves 2-5, 8, 9 are the same equations with two variables
+Moves 1, 6, 7 are the plain equations. Move 10 is new with the schedule: it **re-times when the master
+sends** (e.g. moves `delta` out of a slot and into a later one through the slave battery) without changing what
+the slave spends; `step()` is called with sink gain `r = a_k/a_{k+1}` and the move is applied through `apply()`.
+Moves 2-5, 8, 9 are the same equations with two variables
 moving together. They exist **because single-variable moves can get stuck**: a slot with zero power
 (`P = 0` or `Pbar = 0`, a "dead" slot, water level sitting on the floor `1/h`) cannot supply energy,
 so no single tap looks profitable although energy should pass *through* that slot; likewise the
-slave arrival cap couples `delta_k` with the incoming slave carry. Moves 6-9 need `k+1`, so the last
+slave arrival cap couples `delta_k` with the incoming slave carry. Moves 6-10 need `k+1`, so the last
 slot skips them.
 
 ### `apply()` and `polish()`
@@ -210,11 +234,12 @@ slot skips them.
 * `polish()` extends the pass-through idea to **runs of consecutive dead slots** (paths across two or
   more dead slots): master chains, slave chains, and cross paths master -> down tap -> slave.
   A slot is "dead" if its data energy `<= 1e-6*scale`. It is only called when the fast sweeps have
-  stopped moving.
+  stopped moving. Under S4 the slave chain is attempted only if both end slots transmit, and silent slots are
+  excluded as slave sinks of the cross paths (they may still be crossed).
 
 ### Loop and stopping rule
 
-1. One **sweep** = one pass over all slots trying moves 1-9 (forward on even sweeps, backward on odd).
+1. One **sweep** = one pass over all slots trying moves 1-10 (forward on even sweeps, backward on odd).
 2. If the largest move in the sweep is `< tol*scale` (`tol = 1e-10`, `scale = mean(E)`), call
    `polish()`. If `polish()` also moves less than `tol*scale`, the KKT conditions hold: converged.
 3. `max_iter = 100000` sweeps is only a safety cap. The result reports `iters` and `converged`.
@@ -225,9 +250,10 @@ slot skips them.
 `<= B_max`), rates `sum tau/2 ln(1+hP)` and `sum tau/2 ln(1+hbar*Pbar)`.
 
 ### Public API of `build_2D_dwf.py`
-`beer_lambert(c, d)`, `thz_absorption(freq_thz)`, `thz_gain(freq_thz, d, h0)`, `JointParams`,
-`JointResult`, `joint_dwf(jp, tol, max_iter)`, `check_kkt_joint(jp, r)`,
-`reference_solution_joint(jp)` (cvxpy), and one plotting function per panel (each saves a single
+`beer_lambert(c, d)`, `thz_absorption(freq_thz)`, `thz_gain(freq_thz, d, h0)`, `JointParams`
+(now with `slave_schedule` and per-slot `beta`), `JointResult`, `PhysicalStorageResult`,
+`joint_dwf(jp, tol, max_iter)`, `physical_stored_power(jp, r, ...)`, `solve_with_physical_chain(jp, ...)`,
+`check_kkt_joint(jp, r)`, `reference_solution_joint(jp)` (cvxpy), and one plotting function per panel (each saves a single
 PNG to `path`; `title` is an optional figure-level caption):
 
 | Function | Panel |
@@ -239,17 +265,41 @@ PNG to `path`; `title` is an optional figure-level caption):
 | `plot_throughput_cumulative(jp, r, path, title)` | running total of that throughput |
 | `plot_harvested_energy(jp, r, path, title)` | energy the master harvests per slot, `E_i` |
 | `plot_sharing_energy(jp, r, path, title)` | energy balance of sharing: slave gain `a*delta`, master loss `delta`, net `a*delta - delta` |
+| `plot_physical_stored_power(jp, r, ph, path, title)` | arrived optical power vs solver-assumed stored power vs physical MPPT output |
+| `plot_physical_slave_battery(jp, r, ph, path, title)` | slave battery per the solver vs re-simulated with the physical chain's arrivals |
 
+`plot_transmit_power` and `plot_throughput_per_slot` shade the silent slots (`_shade_silent`).
+`check_kkt_joint` now also returns `slave_silent_slots` and `max_Pbar_in_silent_slots` (S4, should be ~0), and
+tests the `delta` condition only at transmitting slots. `reference_solution_joint` adds `xb[silent] == 0`.
 `plot_harvested_energy` and `plot_sharing_energy` used to be one combined plot (`plot_energy_balance`),
 but `E_i` is normally one to three orders of magnitude larger than the sharing quantities, which
 flattened the sharing curves to the baseline; they are now separate figures with independent scales.
 Likewise the old three-panel `plot_joint` and two-panel `plot_throughput` were split so each panel is
 its own figure (a shared `_new_axis()`/`_finish()` helper pair keeps the styling consistent).
 
+### Physical receive chain (stage 4: post-processing + calibration)
+
+`joint_dwf()` assumes a **linear** tap, `a_i = beta*alpha_i`. The real receive chain is slightly nonlinear
+and its efficiency differs from the placeholder `beta`. Two functions bridge this without touching the solver
+(Option B of `Instructions.md`):
+
+* `physical_stored_power(jp, r, wavelength_nm=532, mppt_efficiency=0.95, ...)`: feeds `r.arrived_power`
+  (`alpha*delta/tau`) through `optical_to_electrical()` and returns a `PhysicalStorageResult`: MPPT output
+  power/energy, `eff_phys = P_mppt / P_arrived` (NaN where nothing arrives), the slave battery re-simulated
+  with the physical arrivals (`b_phys`, `b_peak_phys`), `overflow` above `B_max`, and floor/ceiling violation
+  counts (tolerance `battery_tol_J = 1e-6` J, looser than the solver's own residual). Pure post-processing.
+* `solve_with_physical_chain(jp, ..., tol=1e-3, max_outer=30)`: fixed-point loop. Solve, measure `eff_phys`
+  on slots where `delta` is non-negligible, set per-slot `beta_i = eff_phys_i`, re-solve, until `beta` moves
+  less than `tol`. Slots with `delta = 0` keep their previous `beta`. At the fixed point
+  `a_i*delta_i/tau == mppt_output_power_i`, so `r.b` equals `ph.b_phys` and B_min/B_max are enforced against
+  the real energy. Returns `(jp_calibrated, r, ph, n_outer)`.
+
+Option C (nonlinear tap inside the optimiser) is described in `Instructions.md` and is **not** built.
+
 `thz_absorption` interpolates the measured molecular-absorption table (`thz_freq` [THz] against
 `thz_alpha_m` [1/m], the latter converted from the given `thz_alpha_cm`). `thz_gain` turns that into
 a channel gain via `h = h0 * exp(-alpha_m*d)`, the same shape as `beer_lambert`'s transmittance but
-with a free reference constant `h0` (default 1.0) standing in for whatever the absorption coefficient
+with a free reference constant `h0` (default now 10.0) standing in for whatever the absorption coefficient
 alone does not capture.
 
 ---------------------------------------------------------------------------------------------
@@ -271,46 +321,42 @@ The demo uses these; replace them when real values exist.
 
 | Item | Value | Status |
 |---|---|---|
-| `B_min`, `B_max` | 200 J, 5000 J | given by the user |
-| `E` | `Harvested_energy_summer` (J per 1-min slot) | given by the user |
-| `alpha` | `beer_lambert(0.0399, 0.001)` = 450 nm (blue) optical link, Beer-Lambert c = 0.0399 1/m, d = 0.001 m | given by the user (c, wavelength); distance shared with the THz link |
-| `beta` | 0.8 | PLACEHOLDER |
-| `h`, `hbar` (master/slave THz data link, symmetric) | `thz_gain(0.30, 0.001)` = h0 * exp(-alpha_m*d) = 4.55e-6 (h0 = 1.0) | alpha_m given by the user (0.30 THz -> 12300 1/m, from the measured table); **h0 is a PLACEHOLDER** (see below) |
-| `theta1 = theta2` | 1 | assumption (weighted sum-rate objective) |
+| `B_min`, `B_max` | 20 J, 1500 J (earlier demos: 200/5000, then 200/3000) | chosen for the current demo; the slave battery is small enough that the ceiling binds |
+| `E` | `Harvested_energy_winter` (J per 1-min slot; the summer array is still available) | given by the user |
+| `LINK_DISTANCE_M` | 0.0005 m, shared by the THz data link and the optical energy link (was 0.001) | given by the user |
+| `alpha` | `beer_lambert(0.046, 0.0005)`: 450 nm blue, c = 0.046 1/m (was 0.0399) | given by the user |
+| `beta` | initial 0.4, then **per-slot, calibrated** by `solve_with_physical_chain()` to the photodiode+MPPT secant gain (about 0.380 to 0.400 in the demo) | the 0.4 start is a PLACEHOLDER; calibrated values come from `physical_chain.py` (532 nm, MPPT 0.95) |
+| `h`, `hbar` (master/slave THz data link, symmetric) | `thz_gain(0.30, 0.0005)` = h0 * exp(-12300 * 0.0005) | alpha_m given by the user (0.30 THz, 12300 1/m); **h0 = 10.0 is a PLACEHOLDER** (default changed from 1.0) |
+| `theta1`, `theta2` | 1 and **3** (default changed; slave rate weighted 3x) | assumption (weighted sum-rate) |
+| `slave_schedule` | 30-slot pattern (13 silent, 4 ON, 4 silent, 3 ON, 1 silent, 3 ON, 2 silent) repeated over 60 slots: 20 ON, 40 silent | assumption / test pattern (slave transmits in 1/3 of the slots) |
 | `E_max` (master) | inf | assumption (user said it can go to infinity) |
 | `b0` (initial slave charge) | `B_min` | ASSUMPTION, asked, not yet answered |
+| Receive chain | GaAs/Ge cell (Spectrolab datasheet), FF 0.82, Voc 1.025 V constant, array sized by intensity | datasheet numbers; Voc fall-off at low illumination is NOT modelled (see `physical_chain.py` docstring) |
 | Arrival timing | energy sent in slot k is usable by the slave in slot k | ASSUMPTION (as in Gurakan; acoustic/optical delay negligible vs 60 s) |
 
-Sensitivity worth knowing: with these placeholders the master shares about 34.7 W of its 53 W and the
-slave sends at about 10.2 W (return link is 5x better than the master's own). If `hbar = h` nothing is
-shared. Do not present demo numbers as results about a real system.
-
-**THz/optical link update (current demo).** The data link (both directions, symmetric) is now
-`h = hbar = thz_gain(0.30, 0.001)` (THz molecular absorption, `alpha_m = 12300` 1/m at 0.30 THz,
-`d = 0.001` m, `h0 = 1.0` uncalibrated). The energy-sharing link is now
-`alpha = beer_lambert(0.0399, 0.001)` (450 nm blue light, `c = 0.0399` 1/m, same `d = 0.001` m).
-Because the data link is symmetric (`h = hbar`) and `a = beta*alpha < 1`, the sharing condition
-`a*th2*hbar > th1*h/(1+hP)` (section 3) can never hold, so **the current demo shares nothing**
-(`delta = 0` everywhere): master rate 0.5180 nats, slave rate 0. This is the documented "hbar = h"
-property, not a bug — but it means `h0 = 1.0` is not a useful calibration for showing energy sharing.
-`h0` is the open placeholder: it folds in antenna/beam gain, transmit-power/noise reference and
-free-space spreading that the absorption coefficient alone does not capture, and needs a real value
-(or a full THz path-loss model, spreading + absorption) before these numbers mean anything.
+The sharing test is `R = a*(th2/th1)*(hbar/h)*(1+h*P0)`. With `th2/th1 = 3` and `h0 = 10` it is about 2.75
+(> 1), so sharing pays in the current demo, unlike the earlier `th2 = th1`, `h0 = 1` demo where `R < 1` forced
+`delta = 0` everywhere. `h0` and `theta2` are therefore the knobs that decide whether anything is shared; do
+not present demo numbers as results about a real system.
 
 ---------------------------------------------------------------------------------------------
 
-## 7. Current results (demo, summer array)
+## 7. Current results (demo: winter array, schedule, calibrated beta)
 
-`iters = 6102`, converged. Objective 1837.9704 nats (master 571.3203, slave 1266.6501).
-Master data power 18.68 W (flat), slave data power 10.21 W (flat), shared about 34.70 W
-(about 2082 J per slot), stored in slave about 10.2 W. Slave battery between about 200 and 440 J after
-each slot, peak about 1050 J just after arrivals, far below `B_max`; `B_min` binds only at the end.
-`check_kkt_joint`: final master carry 0, slave end level 200, `delta`-condition violations about 1e-12.
+`iters = 1410`, converged, objective **1902.8194 nats** (master 1141.7442, slave 253.6917; objective =
+th1*master + th2*slave). Master data power 41.58 W mean (min 40.91), slave data power 8.22 W mean (zero in
+the 40 silent slots, about 7e-16 per `check_kkt_joint`), shared 21.65 W mean = **34.2% of the harvest**
+(77945 J sent of 227633 J). Ledger: sent 77945 J -> channel loss 1.8 J, recharge loss 48344 J, stored 29600 J
+= slave data 29600 J (battery change 0). All 20 transmitting slots hit the slave ceiling on arrival (`B_max`);
+`delta_active_slots = 20`, slave at the floor in 57/60 slots, master taps closed in 1/59.
+`check_kkt_joint`: final master carry 0, slave end level 20 J, `delta`-condition violations 0.
+Calibration: 4 outer iterations, `beta` in [0.3798, 0.4000], max |solver battery - physical battery| =
+3.9e-12 J, stored energy solver = physical = 29600 J, no floor/ceiling violations, overflow 0.
 
 **The slave battery trajectory is not unique.** `(P, Pbar)` are unique (strict concavity), but the
 split of carried energy between the master battery and the slave battery is not when both have slack
-(same objective, different `F` and `b`; e.g. peak 1056 J vs 1041 J in two code versions). Do not write
-tests that pin `F` or `b` exactly unless a tie-breaker is added.
+(same objective, different `F` and `b`). Do not write tests that pin `F` or `b` exactly unless a
+tie-breaker is added.
 
 ---------------------------------------------------------------------------------------------
 
@@ -337,7 +383,13 @@ tests that pin `F` or `b` exactly unless a tie-breaker is added.
 * **Gurakan Sec. VIII-A relay example 1** as printed in the provided PDF is inconsistent (cumulative
   `P + delta` exceeds cumulative `E`); example 2 is consistent but is a relay-throughput problem with
   data causality, which this code does not model. Do not use example 1 as ground truth.
-* Comment-only edits were verified by comparing the AST with docstrings stripped and re-running the demo.
+* **Schedule (S4):** the demo's `max_Pbar_in_silent_slots` is about 7e-16 and the `delta` condition holds at
+  every transmitting slot. `reference_solution_joint` includes the S4 constraint, but a systematic cvxpy
+  comparison over random schedules (and for move 10) has NOT been run yet.
+* **Physical calibration:** at the fixed point the solver battery and the re-simulated physical battery agree to
+  about 4e-12 J (section 7).
+* Comment-only edits were verified by comparing the AST with docstrings stripped and re-running the demo (done for the stage-3 code; redo
+  it against the current outputs, see section 10).
 
 ---------------------------------------------------------------------------------------------
 
@@ -354,6 +406,11 @@ tests that pin `F` or `b` exactly unless a tie-breaker is added.
   `xs(i)` gains `+ Ebar[i]` and the arrival cap becomes `g[k] + a[k]*d[k] + Ebar[k] <= W` everywhere
   (`apply`, moves 1-5, 7, 9, `check_kkt_joint`, `reference_solution_joint`, `b_peak`).
 * `check_kkt_joint(..., tol)`: `tol` is unused.
+* `dwf_diagnostics.diagnose()` assumed a scalar `jp.beta` in a couple of print lines (noted in
+  `Instructions.md`); beta is now per-slot after calibration, so check its output if it looks off.
+* `solve_with_physical_chain` calibrates only slots where `delta` moves energy; other slots keep the initial
+  `beta`, which is harmless because they carry no energy. Whether the secant gain is a good tap model at other
+  operating points is untested (that is Option C's job).
 * `B_min` only matters when `B_max` is tight or `b0` is small; with `B_max = 5000` the objective is
   identical for `B_min = 0` and `200`. Do not read that as a bug.
 * Units: `delta` is **energy** (J), not power. `E` values are J per slot; `E/tau` is watts.
@@ -366,7 +423,7 @@ tests that pin `F` or `b` exactly unless a tie-breaker is added.
 
 * **Functionality-preserving edits (comments/docstrings/renames):** verify with the AST check
   `ast.dump` of old vs new with docstrings removed, and re-run the demo (objective must stay
-  1837.9704, `iters = 6102`).
+  1902.8194, `iters = 1410`, with the current demo settings of section 6).
 * Keep 0-indexed slots and the `f[k+1]`, `g[k+1]` index convention; `f[0]`, `f[N]`, `g[N]` are fixed.
 * Every move must remain "exact 1-D maximiser of a concave function, clipped to feasibility", so the
   objective can never decrease. A new move needs: effect on `xm`/`xs`, the marginal-balance equation,
@@ -411,9 +468,15 @@ assert r.converged and abs(ref - r.objective) < 1e-5 * abs(ref)
    max-min or master-only objectives, time-varying `c` per slot.
 9. Performance: vectorise the sweeps.
 10. Calibrate `h0` in `thz_gain` (or replace pure absorption with a full THz path-loss model:
-    spreading loss + molecular absorption + antenna/beam gains) so the symmetric THz link stops
-    forcing `delta = 0` in every demo. Until then the THz/optical demo numbers (section 6) show the
-    link model wired in correctly, not a realistic operating point.
+    spreading loss + molecular absorption + antenna/beam gains). `h0 = 10` and `theta2 = 3` currently make
+    sharing profitable; until `h0` is real, the THz/optical demo numbers (section 6) show the link model
+    wired in correctly, not a realistic operating point.
+11. Verify S4 and move 10 against `reference_solution_joint` over many random schedules (all ON, a single ON
+    slot, leading/trailing silent runs, per-slot `beta`), reporting failure rates as in section 10.
+12. Implement Option C of `Instructions.md` (nonlinear photodiode/MPPT tap inside the optimiser) if the
+    secant-gain calibration proves inadequate; add Voc fall-off at low illumination to `physical_chain.py`.
+13. The schedule is a fixed input. Choosing which slots the slave transmits in would be a combinatorial
+    extension and is not attempted.
 
 ---------------------------------------------------------------------------------------------
 
