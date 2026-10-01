@@ -1018,7 +1018,8 @@ def _finish(fig, ax, path, title, suptitle, jp: JointParams | None = None):
     xlabel = "time slot index k"
     if jp is not None:
         xlabel += f"  (slot length τ = {jp.master.tau:g} s)"
-    axes[-1].set_xlabel(xlabel)
+    if not axes[-1].get_xlabel():
+        axes[-1].set_xlabel(xlabel)
     if axes.size == 1:
         axes[0].set_title(title, loc="left", color=INK, fontsize=11)
         if suptitle:
@@ -1361,6 +1362,66 @@ def plot_physical_slave_battery(jp: JointParams, r: JointResult, ph: PhysicalSto
     _finish(fig, ax, path, "Slave battery: solver model vs physical receive chain", title, jp)
 
 
+def energy_loss_breakdown(jp: JointParams, r: JointResult, ph: PhysicalStorageResult):
+    """Total energy [J] of every stage of the master -> slave energy link, over all slots.
+
+    Chain (each loss is the difference of two consecutive stages):
+        sent by master          sum delta
+        - water attenuation     sum (1 - alpha) delta           -> arrived at photodiode
+        - photodiode conversion sum tau (P_arrived - P_max_el)  -> max electrical power
+        - MPPT / charger        sum tau (P_max_el  - P_mppt)    -> stored in battery
+        - battery overflow      ph.overflow_energy (a real battery rejects it; ~0 once calibrated)
+    Returns (losses, stages): ordered dicts {label: Joules}.
+    """
+    tau = jp.master.tau
+    sent = float(r.delta.sum())
+    arrived = float(tau * r.arrived_power.sum())
+    electrical = float(tau * ph.chain.max_electrical_power.sum())
+    stored = float(ph.stored_energy_phys.sum())
+    losses = {
+        "water attenuation\n(Beer-Lambert, 1-α)": sent - arrived,
+        "photodiode conversion\n(optical → electrical)": arrived - electrical,
+        "MPPT / charger\n(1 - η_mppt)": electrical - stored,
+        "battery overflow\n(above B_max)": float(ph.overflow_energy),
+    }
+    stages = {"sent by master": sent, "arrived at photodiode": arrived,
+              "max electrical power": electrical, "stored in battery": stored}
+    return losses, stages
+
+
+def plot_loss_histogram(jp: JointParams, r: JointResult, ph: PhysicalStorageResult,
+                        path: str, title: str = ""):
+    """One bar per loss element of the energy link (total over all slots), plus the delivered energy.
+
+    Bars are in Joules; the label above each bar gives its share of the energy the master sent.
+    Loss bars are coloured by the physical stage; the last bar (green) is the energy that is
+    actually stored, i.e. what is NOT lost.
+    """
+    losses, stages = energy_loss_breakdown(jp, r, ph)
+    sent = stages["sent by master"]
+    names = list(losses) + ["delivered to\nslave battery"]
+    vals = list(losses.values()) + [stages["stored in battery"]]
+    cols = [C_MASTER, C_SLAVE, INK2, GRID, C_LINK]
+
+    fig, ax = _new_axis(figsize=(10.5, 5.2))
+    x = np.arange(len(vals))
+    bars = ax.bar(x, vals, color=cols, width=0.62, edgecolor=INK2, linewidth=0.6)
+    top = max(vals) if max(vals) > 0 else 1.0
+    for b, v in zip(bars, vals):
+        pct = 100.0 * v / sent if sent > 0 else 0.0
+        ax.annotate(f"{v:.3g} J\n{pct:.3g} % of sent", (b.get_x() + b.get_width() / 2, v),
+                    xytext=(0, 4), textcoords="offset points", ha="center", va="bottom",
+                    fontsize=9, color=INK)
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, fontsize=9, color=INK2)
+    ax.set_ylim(0, top * 1.22)
+    ax.set_ylabel("energy over all slots [J]")
+    ax.set_xlabel(" ")                                   # not a per-slot plot: suppress the slot-index label
+    ax.text(0.99, 0.97, f"energy sent by master: {sent:.4g} J", transform=ax.transAxes,
+            ha="right", va="top", fontsize=9, color=INK2)
+    _finish(fig, ax, path, "Energy lost at each element of the master → slave link", title, None)
+
+
 # ----------------------------------------------------------------------------
 # Demo
 # ----------------------------------------------------------------------------
@@ -1417,3 +1478,4 @@ if __name__ == "__main__":
     plot_cumulative_energy(jp, r, "plot_cumulative_energy.png", caption)
     plot_physical_stored_power(jp, r, ph, "plot_physical_stored_power.png", caption)
     plot_physical_slave_battery(jp, r, ph, "plot_physical_slave_battery.png", caption)
+    plot_loss_histogram(jp, r, ph, "plot_loss_histogram.png", caption)
