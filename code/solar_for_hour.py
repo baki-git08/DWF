@@ -62,7 +62,7 @@ def print_system_documentation():
 
 7. HOW MUCH ENERGY CAN WE HARVEST WITHIN A DAY?
    ─────────────────────────────────────────────
-   Computed for a 25 m² panel at each season (see Section 3 of results).
+   Computed for a 5 m² panel at each season (see Section 3 of results).
    Total daily energy = ∫ P(t) dt over daylight hours.
 
 8. FACTORS AFFECTING HARVESTING
@@ -309,7 +309,7 @@ def run_analysis():
 
     harvester = MinuteSolarHarvester(
         panel_width_m=5.0,
-        panel_height_m=5.0,
+        panel_height_m=1.0,
         base_efficiency=0.20,
         location='Johannesburg',
         noise_level=0.15,
