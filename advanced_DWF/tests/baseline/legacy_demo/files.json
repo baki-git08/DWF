@@ -1,0 +1,13 @@
+{
+ "plot_cumulative_energy.png": "b2467e670af268cf6a0a1c6bf6b59cd6a478b55fc58d4370de4943b1c04ee641",
+ "plot_harvested_energy.png": "01ab20f9dd4921f9efb4e0593a2febf109b8f51f7c5c970624926e831a473ae3",
+ "plot_link_power.png": "64254099958702f1b71f61201e1c2a4c01e39ea63079830b8d151890995f41b9",
+ "plot_loss_histogram.png": "d3cd57eb356e451d64a0a1063d70c8d2ca7c9a223441a70420cc6cae11626391",
+ "plot_physical_slave_battery.png": "0c17ccf76432ea62131c7549da4018397b3567ce1b2381546f22461af9d94b52",
+ "plot_physical_stored_power.png": "d7babbae4b5ccaa33296575d0d3987280e7464cc183c90009e3b956c5e391167",
+ "plot_sharing_energy.png": "59e2328b8d595349af5ecd835f1f422087cda697af2152327b6ce31530316fdd",
+ "plot_slave_battery.png": "57a062120bc3d63ba284e7a6f4e7a651c8aa966c8cdffe3fb82f931c8009c976",
+ "plot_throughput_cumulative.png": "2e3ce68b3003a747b3bb57b02db38b3879fb8a86e432b61c9b325bdfe3ddb10e",
+ "plot_throughput_per_slot.png": "98d6f25126ff8733039967e5f6357481ec4fbb9d06f00f16c7ecb47d5242433d",
+ "plot_transmit_power.png": "3f472d07053ab54b80314bfee14d7b942ffcf52492249d570411eaade4a50e27"
+}

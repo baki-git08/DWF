@@ -1,0 +1,18 @@
+{
+ "out_physical_demo/plot_cumulative_energy.png": "68a44de6db3c7b5c64bc7a9628504aad4d862df3e9952037a7df50fc32a80ad7",
+ "out_physical_demo/plot_harvested_energy.png": "f01002cfc60eee40ab08b78331cd2f834191e1204623bab2b9687d890bbaf721",
+ "out_physical_demo/plot_link_power.png": "0b243adf727222aca53a60f705d88aca0b5762f730b30a7dad41504db4dc1848",
+ "out_physical_demo/plot_loss_histogram.png": "f4f295fa5b206fd862949f45baa68a257e80a71eb81317ac53dbaf319ac49075",
+ "out_physical_demo/plot_physical_slave_battery.png": "36f1d85262f2cfd4c4c457fbb77000b2fb2a03c6df8970818bbb9ea73861b1e2",
+ "out_physical_demo/plot_physical_stored_power.png": "8f85c2091a133a2f21665b240cd79ce6c2be86222813f546f6271bc2be536331",
+ "out_physical_demo/plot_sharing_energy.png": "56f969a39d150e49f2a2e2209c275239dcdb6efbf946fb7f4c92a8ade157fe0a",
+ "out_physical_demo/plot_slave_battery.png": "72ed4ddfb282604e0d087a4dd6a00518e344dcb850fc27afb55c93161668e921",
+ "out_physical_demo/plot_slave_battery_window.png": "72669df48dc3e4cd8f1b110c18801f2e1d5e32b0702b27348cafc8079993f946",
+ "out_physical_demo/plot_slave_cumulative_energy.png": "571706424c580d3a5d73ea0b1f0c50ace433d7a3e6036f6a17a461b6505aaef9",
+ "out_physical_demo/plot_slave_energy_breakdown.png": "e3096963c17484e4e41936d07f024e997505884cc82555363c77fdc5b6c937c7",
+ "out_physical_demo/plot_slave_load_per_slot.png": "ee17e8f567c2d03bcabdbae87e7c6883107deea9b94cb0bcaa92352b0bd7d914",
+ "out_physical_demo/plot_throughput_cumulative.png": "685b069df11a3f7f6b30f76f1c8f34c68ef9c522f07d5ef90a5828f50baff9f5",
+ "out_physical_demo/plot_throughput_per_slot.png": "37110495445cebb8077d6e4101c96f17d95f5db69bc82637ae651b367641311a",
+ "out_physical_demo/plot_transmit_power.png": "c33d0208e9dad49def4a42381aa82305fccb329c55b586b5754a17390fd0819d",
+ "out_physical_demo/slave_energy_profile.csv": "de7a14ccb6c5dd8de9d6d74d7f829478ccb6350c9f1b86a7c5d1137ee38ebcde"
+}

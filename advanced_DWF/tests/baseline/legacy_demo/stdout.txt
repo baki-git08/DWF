@@ -1,0 +1,86 @@
+============================================================================================
+1. CHANNEL CONDITIONS  (optical energy link, master -> slave)
+============================================================================================
+  alpha (transmittance)  : min 1 | mean 1 | max 1   -> 9.99e-05 dB channel loss
+  beta  (recharge eff.)  : min 0.3798 | mean 0.3933 | max 0.4          -> 4.05 dB recharge loss (mean)
+  a = beta*alpha         : min 0.3798 | mean 0.3932 | max 0.4   -> net tap loss 4.05 dB
+  per Joule sent         : 0.00% lost in the channel, 60.67% lost in recharging, 39.32% stored
+                           dominant loss: recharging efficiency (beta)
+  slave battery          : B_min 20 J, B_max 2000 J (window 1980 J), initial b0 20 J
+
+============================================================================================
+2. COMMUNICATION LINKS  (data links; noise-normalised, received power = h*P)
+============================================================================================
+  master link  h         : min 0.02133 | mean 0.02133 | max 0.02133   floor 1/h = 46.87 W   value of first Joule th1*h/2 = 0.01067
+  slave link   hbar      : min 0.02133 | mean 0.02133 | max 0.02133   floor 1/hbar = 46.87 W   value of first Joule th2*hbar/2 = 0.032
+  link ratio hbar/h      : 1  (links are EQUAL)
+  master link at optimum : P = 45.85 W, SNR h*P = 0.9782 (-0.0956 dB), rate 1225 nats
+                           MID SNR: the log curve is bending (diminishing returns matter)
+  slave  link at optimum : Pbar = 6.6 W, SNR hbar*Pbar = 0.1408 (-8.514 dB), rate 191.9 nats
+                           MID SNR: the log curve is bending (diminishing returns matter)
+
+============================================================================================
+3. SHARING DECISION  (does the master send energy, and why does it stop?)
+============================================================================================
+  HEADLINE: MASTER SHARES 27.5% of its harvest. Master power 63.23 -> 45.85 W (its marginal value rose 0.00454 -> 0.00541); slave power 0 -> 6.6 W (a*s fell 0.0126 -> 0.0116). In 12 slots the slave battery is full on arrival (B_max), so more would be wasted. 3 slots are unbalanced (not converged or another constraint).
+
+  Marginal value of one Joule (nats/J)      before sharing        at the optimum
+    master  m = th1*h/(2(1+hP))             0.004542              0.005409
+    slave   a*s  (after the tap loss)       0.01258               0.01158
+    net per Joule sent  (a*s - m)           0.008043              0.006172   (sends while > 0)
+    powers: master 63.23 -> 45.85 W ;  slave 0 -> 6.6 W
+
+  Sharing test R = a * (th2/th1) * (hbar/h) * (1 + h*P0) = 2.771   (>1 -> sharing pays)
+    a = beta*alpha (tap gain)          x 0.3932      <-- pulls AGAINST sharing
+    th2/th1 (rate weight ratio)        x 3           <-- helps sharing
+    hbar/h (slave vs master link)      x 1           (neutral)
+    1+h*P0 (master log saturation)     x 2.349       <-- helps sharing
+
+  Per-slot outcome (60 slots):  CAP 12, UNBALANCED 3, BLOCKED 45
+    CAP           12 slots : slave battery full on arrival
+    UNBALANCED     3 slots : not converged or another constraint
+    BLOCKED       45 slots : would pay but another constraint binds
+
+============================================================================================
+4. ENERGY LEDGER  (Joules)
+============================================================================================
+  harvested 227633.0 = master data 165066.1 + sent 62566.9 (+ master leftover 9.1e-13)
+  sent 62566.9 -> channel loss 1.4, recharge loss 38805.4, stored 23760.0
+  stored 23760.0 = slave data 23760.0 + battery change 0.0
+
+============================================================================================
+5. ACTIVE CONSTRAINTS
+============================================================================================
+  master taps closed (F=0): 2/59 | slave at floor: 57/60 | slave at ceiling on arrival: 12/60
+  P=0 slots: 0 | Pbar=0 slots: 48 | delta=0 slots: 45
+
+============================================================================================
+6. SOLVER
+============================================================================================
+  objective 1800.74 nats = th1*1225 + th2*191.9 | shared fraction of harvest 27.5% | iters 517 | converged True
+iters=517 converged=True
+objective=1800.7440  master=1225.0962  slave=191.8826
+P  mean=45.85 W   Pbar mean=6.60 W   shared mean=17.38 W
+  final_master_carry: 9.094947017729282e-13
+  slave_end_level: 20.0
+  min_P: 42.47977963767154
+  min_Pbar: 0.0
+  min_delta: 0.0
+  slave_min_level: 20.0
+  slave_max_level: 2000.0
+  min_master_carry: 9.094947017729282e-13
+  delta_active_slots: 12
+  delta_cond_violation_active: 0.0
+  delta_cond_violation_inactive: 0.0
+  arrival_cap_active_slots: 12
+  slave_silent_slots: 48
+  max_Pbar_in_silent_slots: 4.263256414560601e-15
+  slave_overhead_total_J: 0.0
+  max_cap_violation_J: 0.0
+  mppt_cap_active_slots: 0
+  min_slave_level_margin_J: 0.0
+  slave_ledger_error_J: 0.0
+calibration outer iters = 4, beta range = [0.3798, 0.4000]
+max |solver battery - physical battery| = 9.095e-13 J
+stored energy  solver=23760.00 J   physical=23760.00 J
+physical battery floor_violations=0  ceiling_violations=0  overflow_energy=0.000e+00 J  overflow_mppt=0.000e+00 J

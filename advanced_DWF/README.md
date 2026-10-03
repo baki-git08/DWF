@@ -41,7 +41,9 @@ load"). Stage 5 is the current state; it is off by default and `joint_dwf()` sta
 | File | What it is |
 |---|---|
 | `build_dwf.py` | Stage 1: master-only DWF. `MasterParams`, `directional_water_filling`, `check_kkt`, `reference_solution` (scipy), `plot_result`. Holds `Harvested_energy_summer` and `Harvested_energy_winter` (60 samples, J per 1-minute slot). |
-| `build_2D_dwf.py` | Stages 3-4: joint master + slave DWF, slave schedule (S4), physical-chain post-processing and calibration. Imports `Harvested_energy_summer`/`Harvested_energy_winter` and `MasterParams` from `build_dwf.py`, `diagnose` from `dwf_diagnostics.py`, and `optical_to_electrical`, `OpticalReceiveChainResult` from `physical_chain.py`. Fully commented (module docstring is a reading guide). |
+| `build_2D_dwf.py` | Stages 3-4 entry point: the theory reading guide (module docstring), the `DEMO` switch and `python build_2D_dwf.py [legacy_demo \| physical_demo]`. The code itself lives in `dwf2d/`; this file re-exports every name it has always had, so `from build_2D_dwf import ...` keeps working unchanged. |
+| `dwf2d/` | Stages 3-4 implementation, one module per concern (see "Code layout" below): joint master + slave DWF, slave schedule (S4), physical-chain post-processing and calibration, verification, plots, demos. Imports `Harvested_energy_summer`/`Harvested_energy_winter` and `MasterParams` from `build_dwf.py`, `diagnose` from `dwf_diagnostics.py`, and `optical_to_electrical`, `OpticalReceiveChainResult` from `physical_chain.py`. |
+| `tests/` | Golden-master regression check: `python tests/regression.py check` (or `python -m pytest tests`) re-runs both demos and compares stdout, every result array (bit-for-bit), every PNG/CSV hash and the `build_2D_dwf` API against `tests/baseline/`. `python tests/regression.py capture` re-records the baseline. Do that only after an intended change in results. |
 | `physical_chain.py` | Receive side of the optical energy link: optical power at the slave -> GaAs/Ge cell array (Spectrolab datasheet: Voc = 1.025 V, FF = 0.82, QE-derived responsivity at 450/532 nm) -> MPPT -> electrical power into the battery. `optical_to_electrical()`, `photodiode_stage()`, `mppt_stage()`, `size_array_by_intensity()`. Never modifies the solver. |
 | `dwf_diagnostics.py` | `diagnose(jp, r, load=None)`: human-readable report (sharing decision, energy ledger, active constraints, solver status). With `load` (from `slave_load.make_load`) it also prints the dummy-timing banner, the electronics energy per component, the MPPT-cap status, the window check and the supercap sizing. Called by the demo. |
 | `slave_config.py` | **The only file to edit** for the slave electronics: real datasheet powers, DUMMY durations per slot type (scalars or length-N arrays, `None` = rest of the slot), `TIMING_IS_DUMMY`, `ETA_TX`, `STORAGE_MARGIN`. Pure data. |
@@ -54,7 +56,28 @@ load"). Stage 5 is the current state; it is off by default and `joint_dwf()` sta
 | `dwf_master_inf.png`, `dwf_master_3300.png` | Stage 1 plots (E_max = inf and 3300 J). |
 | Reference papers (PDF, provided by the user) | Gurakan et al., *Energy Cooperation in Energy Harvesting Communications* (2-D DWF, right/down taps); Ozel et al., *Transmission with Energy Harvesting Nodes in Fading Wireless Channels* (and the INFOCOM'11 version); Ozel et al., *Optimal Broadcast Scheduling ... Finite Capacity Battery*; *Sum-rate optimal power policies ... interference channel*. |
 
-`build_dwf.py` and `physical_chain.py` must not be modified as a side effect of solver work; `build_2D_dwf.py` only imports from them.
+`build_dwf.py` and `physical_chain.py` must not be modified as a side effect of solver work; `build_2D_dwf.py` and `dwf2d/` only import from them.
+
+### Code layout (`dwf2d/`)
+
+| Module | Contents |
+|---|---|
+| `dwf2d/channels.py` | `beer_lambert`, the THz absorption table (`thz_freq`, `thz_alpha_cm`, `thz_alpha_m`), `thz_absorption`, `thz_gain` |
+| `dwf2d/params.py` | `JointParams`, `JointResult` |
+| `dwf2d/solver.py` | `joint_dwf`, its start points `_jit_start` / `_lp_start`, `InfeasibleSlaveBudget` |
+| `dwf2d/physical.py` | `PhysicalStorageResult`, `physical_stored_power`, `solve_with_physical_chain` |
+| `dwf2d/verification.py` | `check_kkt_joint`, `reference_solution_joint` (cvxpy) |
+| `dwf2d/plotting/style.py` | palette, `BITS_PER_NAT`, `EDGE_TOL`, shared helpers (`_new_axis`, `_new_axes`, `_finish`, `_legend`, `_mark`, `_shade_silent`, `_bound_masks`, `_rates_bits`) |
+| `dwf2d/plotting/joint.py` | panels of the joint solution (`plot_link_power` ... `plot_sharing_energy`) |
+| `dwf2d/plotting/physical.py` | `plot_physical_stored_power`, `plot_physical_slave_battery`, `energy_loss_breakdown`, `plot_loss_histogram` |
+| `dwf2d/plotting/slave_panels.py` | slave-load panels, `slave_load_components`, `write_slave_energy_csv` |
+| `dwf2d/demos.py` | `_demo_problem`, `_run_demo`, `legacy_demo`, `physical_demo` |
+
+Dependencies only point "down" this table (`params` ← `solver` ← `physical` ← plots ← `demos`), so there are no import
+cycles. Where new code goes:
+- **A new plot:** add it to the matching `dwf2d/plotting/` module, call it from `_run_demo`, and re-export it in `build_2D_dwf.py`.
+- **A new model or channel:** add it to `channels.py`, or to a new module.
+- **Before committing any refactor:** run `python tests/regression.py check`. It must print `IDENTICAL to baseline`.
 
 Dependencies: `numpy`, `matplotlib` (plots), plus the local modules above. `cvxpy` (with the CLARABEL solver) only for
 `reference_solution_joint()`, which is a cross-check, not part of the algorithm.

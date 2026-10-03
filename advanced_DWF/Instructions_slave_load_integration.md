@@ -1,5 +1,9 @@
 # Integrating the slave load profile into the DWF solver
 
+> **Note (code layout):** `build_2D_dwf.py` has since been split into the `dwf2d/` package (see README section 2,
+> "Code layout"). Line numbers of the form `build_2D_dwf.py:NNN` below refer to the old single file; the
+> functions keep their names and are still importable from `build_2D_dwf`.
+
 Instructions for Claude Code. Read this together with the DWF context README (`Master + Slave
 Directional Water-Filling`), `slave_load_profile.py` (the example/standalone module), `build_2D_dwf.py`,
 `dwf_diagnostics.py`, `physical_chain.py` and `Instructions.md`. This file was written from the README and

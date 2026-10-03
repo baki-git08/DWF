@@ -1,5 +1,9 @@
 # Instructions: replacing the theoretical slave battery with the physical (photodiode+MPPT) one
 
+> **Note (code layout):** `build_2D_dwf.py` has since been split into the `dwf2d/` package (see README section 2,
+> "Code layout"). Line numbers of the form `build_2D_dwf.py:NNN` below refer to the old single file; the
+> functions keep their names and are still importable from `build_2D_dwf`.
+
 **How to use this file:** paste/point Claude Code at this file and say "implement Option B" or
 "implement Option C" from `Instructions.md`. Each option is self-contained: math, file-by-file
 changes, pseudocode, and a verification checklist. Do not implement both at once — read the

@@ -1,0 +1,96 @@
+slave timing: DUMMY values (edit slave_config.py)
+physical_demo: window W = 2.442 J (size_storage), b0 - B_min = 0.191 J, sum c = 2.462 J, MPPT cap = 18.81 J, eta_tx = 1
+slave timing: DUMMY values (edit slave_config.py)
+============================================================================================
+1. CHANNEL CONDITIONS  (optical energy link, master -> slave)
+============================================================================================
+  alpha (transmittance)  : min 1 | mean 1 | max 1   -> 9.99e-05 dB channel loss
+  beta  (recharge eff.)  : min 0.3798 | mean 0.3798 | max 0.3798          -> 4.2 dB recharge loss (mean)
+  a = beta*alpha         : min 0.3798 | mean 0.3798 | max 0.3798   -> net tap loss 4.2 dB
+  per Joule sent         : 0.00% lost in the channel, 62.02% lost in recharging, 37.98% stored
+                           dominant loss: recharging efficiency (beta)
+  slave battery          : B_min 20 J, B_max 22.442 J (window 2.442 J), initial b0 20.191 J
+
+============================================================================================
+2. COMMUNICATION LINKS  (data links; noise-normalised, received power = h*P)
+============================================================================================
+  master link  h         : min 0.02133 | mean 0.02133 | max 0.02133   floor 1/h = 46.87 W   value of first Joule th1*h/2 = 0.01067
+  slave link   hbar      : min 0.02133 | mean 0.02133 | max 0.02133   floor 1/hbar = 46.87 W   value of first Joule th2*hbar/2 = 0.032
+  link ratio hbar/h      : 1  (links are EQUAL)
+  master link at optimum : P = 63.21 W, SNR h*P = 1.349 (1.3 dB), rate 1537 nats
+                           MID SNR: the log curve is bending (diminishing returns matter)
+  slave  link at optimum : Pbar = 0.007638 W, SNR hbar*Pbar = 0.000163 (-37.879 dB), rate 0.2932 nats
+                           LOW SNR: rate ~ linear in power, the log curve has not started to bend
+
+============================================================================================
+3. SHARING DECISION  (does the master send energy, and why does it stop?)
+============================================================================================
+  HEADLINE: MASTER SHARES 0.0% of its harvest. Master power 63.23 -> 63.21 W (its marginal value rose 0.00454 -> 0.00454); slave power 0 -> 0.007638 W (a*s fell 0.0122 -> 0.0122). In 12 slots the slave battery is full on arrival (B_max), so more would be wasted. 34 silent slots receive energy to cover the slave electronics drain.
+
+  Marginal value of one Joule (nats/J)      before sharing        at the optimum
+    master  m = th1*h/(2(1+hP))             0.004542              0.004542
+    slave   a*s  (after the tap loss)       0.01215               0.01215
+    net per Joule sent  (a*s - m)           0.007611              0.007609   (sends while > 0)
+    powers: master 63.23 -> 63.21 W ;  slave 0 -> 0.007638 W
+
+  Sharing test R = a * (th2/th1) * (hbar/h) * (1 + h*P0) = 2.676   (>1 -> sharing pays)
+    a = beta*alpha (tap gain)          x 0.3798      <-- pulls AGAINST sharing
+    th2/th1 (rate weight ratio)        x 3           <-- helps sharing
+    hbar/h (slave vs master link)      x 1           (neutral)
+    1+h*P0 (master log saturation)     x 2.349       <-- helps sharing
+
+  Per-slot outcome (60 slots):  CAP 12, BLOCKED 14, FEED 34
+    CAP           12 slots : slave battery full on arrival
+    BLOCKED       14 slots : would pay but another constraint binds
+    FEED          34 slots : delta > 0 in a silent slot: energy stored for later / electronics drain
+
+============================================================================================
+4. ENERGY LEDGER  (Joules)
+============================================================================================
+  harvested 227633.0 = master data 227554.6 + sent 78.4 (+ master leftover 3.9e-12)
+  sent 78.4 -> channel loss 0.0, recharge loss 48.6, stored 29.8
+  stored 29.8 + initial excess 0.2 = slave data 27.5 + slave electronics 2.462 + final level above floor 0
+  slave electronics (non-TX) 2.462 J = camera 0.216, mcu 1.137, flash 1.103, mppt 0.005181
+
+============================================================================================
+5. ACTIVE CONSTRAINTS
+============================================================================================
+  master taps closed (F=0): 0/59 | slave at floor: 46/60 | slave at ceiling on arrival: 12/60
+  P=0 slots: 0 | Pbar=0 slots: 48 | delta=0 slots: 14
+  MPPT cap (S5): binds in 0/60 slots | largest stored energy 2.442 J = 13.0% of capA = 18.81 J
+  battery window: W = 2.442 J | solution needs max(b_peak) - B_min = 2.442 J | profile W_req = 0.8235 J (design x margin 1.647 J) -> window covers W_req
+  supercap sizing: C >= 0.148 F for the 2.2-5.2 V range -> nearest standard 0.22 F (window 2.442 J)
+
+============================================================================================
+6. SOLVER
+============================================================================================
+  objective 1537.73 nats = th1*1537 + th2*0.2932 | shared fraction of harvest 0.0% | iters 1667 | converged True
+iters=1667 converged=True
+objective=1537.7280  master=1536.8484  slave=0.2932
+P  mean=63.21 W   Pbar mean=0.01 W   shared mean=0.02 W
+  final_master_carry: 3.893774191965349e-12
+  slave_end_level: 20.0
+  min_P: 63.209602333771464
+  min_Pbar: 0.0
+  min_delta: 0.0
+  slave_min_level: 20.0
+  slave_max_level: 22.442
+  min_master_carry: 90.25875412510878
+  delta_active_slots: 12
+  delta_cond_violation_active: 0.0
+  delta_cond_violation_inactive: 0.0
+  arrival_cap_active_slots: 12
+  slave_silent_slots: 48
+  max_Pbar_in_silent_slots: 4.654841327204432e-18
+  slave_overhead_total_J: 2.46152712
+  max_cap_violation_J: 0.0
+  mppt_cap_active_slots: 0
+  min_slave_level_margin_J: 0.0
+  slave_ledger_error_J: -3.552713678800501e-15
+calibration outer iters = 4, beta range = [0.3798, 0.3798]
+max |solver battery - physical battery| = 3.553e-14 J
+stored energy  solver=29.77 J   physical=29.77 J
+physical battery floor_violations=0  ceiling_violations=0  overflow_energy=0.000e+00 J  overflow_mppt=0.000e+00 J
+wrote the 4 slave-load PNGs and slave_energy_profile.csv to out_physical_demo
+physical_demo vs legacy_demo (same master; h0 and theta2 = 3 are placeholders; DUMMY durations):
+  slave data energy 27.5 J vs 2.376e+04 J ; master -> slave sent 78.39 J vs 6.257e+04 J ; objective 1537.7 vs 1800.7

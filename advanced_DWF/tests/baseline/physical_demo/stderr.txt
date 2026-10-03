@@ -1,0 +1,1 @@
+UserWarning: TX window (0.8..0.8 s) is shorter than tau = 60 s: the DWF credits tau/2 ln(1+hbar*Pbar) with Pbar averaged over the whole slot; a real burst radiates xs/t_tx for t_tx < tau and, by concavity, delivers fewer nats than credited.
