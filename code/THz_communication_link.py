@@ -25,13 +25,13 @@ import matplotlib.pyplot as plt
 C = 3e8                     # speed of light (m/s)
 
 # Frequencies of interest (mmWave band)
-FREQ_CHOICES = [30e9, 60e9, 100e9, 300e9]
+FREQ_CHOICES = [100e9, 300e9]
 
 # Attenuation table (dB/m) — indicative values
 WATER_ATTENUATION = {
-    'Freshwater': {30e9: 3,   60e9: 10,  100e9: 30,   300e9: 200},
-    'Coastal':    {30e9: 50,  60e9: 120, 100e9: 300,  300e9: 1500},
-    'Seawater':   {30e9: 150, 60e9: 400, 100e9: 1000, 300e9: 5000},
+    'Freshwater': {100e9: 30,   300e9: 200},
+    'Coastal':    {100e9: 300,  300e9: 1500},
+    'Seawater':   {100e9: 1000, 300e9: 5000},
 }
 
 # Link parameters

@@ -62,7 +62,7 @@ def _regime(snr: float) -> str:
 # ----------------------------------------------------------------------------------------------
 # main entry point
 # ----------------------------------------------------------------------------------------------
-def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None = None) -> dict:
+def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None = None, load: dict | None = None) -> dict:
     """Explain WHY a solution looks the way it does. Prints a six-section report, returns a dict.
 
     Parameters
@@ -75,6 +75,10 @@ def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None =
         optical_wavelength_nm, optical_atten_per_m, optical_distance_m   (energy link)
         thz_freq_THz, thz_alpha_m, thz_distance_m                         (data links)
         They are only used for cross-checks (does exp(-c*d) equal alpha? what h0 is implied?).
+    load : optional dict from slave_load.make_load(jp) (components, c, sizing, timing banner). When given,
+        the report also shows the dummy-timing banner, the slave electronics energy per component in the
+        ledger, the MPPT-cap (S5) status, the battery-window check against the profile's W_req, and the
+        supercap sizing summary.  Without it the report is exactly as before.
 
     1. CHANNEL CONDITIONS (optical energy link, master -> slave)
     ------------------------------------------------------------
@@ -182,17 +186,28 @@ def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None =
     gap_rel = (mk - a * sk) / mk                        # >0: master keeps; 0: balanced; <0: sending would pay
     on = r.delta > sc
     cap = r.b_peak >= jp.B_max - sc
+    capA = jp.capA
+    s5 = np.isfinite(capA) & (a * r.delta >= capA - sc)            # MPPT input rating binds (S5)
+    silent = (~jp.slave_schedule) & bool(np.any(jp.overhead > 0))   # FEED label only when a slave load is attached
     reason = np.empty(N, dtype=object)
     for k in range(N):
         if on[k]:
-            reason[k] = "CAP" if cap[k] else ("BALANCED" if abs(gap_rel[k]) < 1e-4 else "UNBALANCED")
+            if silent[k]:
+                reason[k] = "FEED"                                 # silent slot: energy stored for later / electronics drain
+            elif cap[k]:
+                reason[k] = "CAP"
+            elif s5[k]:
+                reason[k] = "MPPT_CAP"
+            else:
+                reason[k] = "BALANCED" if abs(gap_rel[k]) < 1e-4 else "UNBALANCED"
         else:
             reason[k] = "NOT_WORTH" if gap_rel[k] >= -1e-9 else ("CAP_BLOCKED" if cap[k] else "BLOCKED")
-    counts = {k: int((reason == k).sum()) for k in ("BALANCED", "CAP", "UNBALANCED", "NOT_WORTH", "CAP_BLOCKED", "BLOCKED")}
+    counts = {k: int((reason == k).sum()) for k in ("BALANCED", "CAP", "UNBALANCED", "NOT_WORTH", "CAP_BLOCKED", "BLOCKED",
+                                                     "MPPT_CAP", "FEED")}
 
     sent, etot = float(r.delta.sum()), float(E.sum())
     share = sent / etot if etot else 0.0
-    if counts["BALANCED"] + counts["CAP"] + counts["UNBALANCED"] == 0:
+    if counts["BALANCED"] + counts["CAP"] + counts["UNBALANCED"] + counts["MPPT_CAP"] + counts["FEED"] == 0:
         if counts["NOT_WORTH"] == N:
             worst = min(factors, key=factors.get)
             headline = (f"MASTER DOES NOT SHARE. A Joule is worth {m0.mean():.4g} to the master but only "
@@ -209,6 +224,10 @@ def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None =
             headline += f"It STOPS where the marginals balance (m = a*s) in {counts['BALANCED']} of {N} slots. "
         if counts["CAP"]:
             headline += f"In {counts['CAP']} slots the slave battery is full on arrival (B_max), so more would be wasted. "
+        if counts["MPPT_CAP"]:
+            headline += f"In {counts['MPPT_CAP']} slots the MPPT input rating (S5) limits the stored energy. "
+        if counts["FEED"]:
+            headline += f"{counts['FEED']} silent slots receive energy to cover the slave electronics drain. "
         if counts["UNBALANCED"]:
             headline += f"{counts['UNBALANCED']} slots are unbalanced (not converged or another constraint)."
     out["decision"] = {
@@ -227,6 +246,7 @@ def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None =
         "recharge_loss": float((alpha * (1 - beta) * r.delta).sum()),
         "stored": float((a * r.delta).sum()), "slave_data": float(tau * r.Pbar.sum()),
         "battery_change": float(r.b[-1] - jp.b0),
+        "slave_overhead": float(jp.overhead.sum()),
     }
     out["active"] = {
         "master_taps_closed": int((r.F[:-1] <= sc).sum()), "master_taps": N - 1,
@@ -236,6 +256,24 @@ def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None =
         "delta_zero_slots": int((r.delta <= sc).sum()), "slots": N,
     }
     out["shared_fraction"] = share
+    # ---- slave load (only reported when attached) ----
+    stored_cap = np.where(np.isfinite(capA), a * r.delta, 0.0)
+    out["mppt_cap"] = {
+        "active": bool(np.isfinite(capA).any()),
+        "binding_slots": int(s5.sum()),
+        "max_stored_J": float((a * r.delta).max()),
+        "capA_J": float(capA[np.isfinite(capA)].min()) if np.isfinite(capA).any() else float("inf"),
+        "max_fraction_of_cap": float(np.max(stored_cap / np.where(np.isfinite(capA), capA, 1.0))) if np.isfinite(capA).any() else 0.0,
+    }
+    out["window"] = {"W": jp.W, "max_b_peak_minus_Bmin": float(r.b_peak.max() - jp.B_min)}
+    if load is not None:
+        sz = load["sizing"]
+        out["window"].update(W_req=sz["W_req"], W_design=sz["W_design"],
+                             ok=bool(jp.W + 1e-9 >= out["window"]["max_b_peak_minus_Bmin"]),
+                             covers_W_req=bool(jp.W + 1e-9 >= sz["W_req"]))
+        out["load"] = {"banner": load.get("banner", ""),
+                       "components_J": {k: float(load[k].sum()) for k in ("camera", "mcu", "flash", "mppt")},
+                       "sizing": dict(sz)}
     # backwards-compatible keys
     out["sharing_ratio"], out["m_mean"], out["a_s_mean"] = out["decision"]["R_mean"], float(mk.mean()), float((a * sk).mean())
     out["snr_master"], out["snr_slave"] = snr_m, snr_s
@@ -246,6 +284,8 @@ def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None =
     # ================================== printing ==============================================
     L, A = out["ledger"], out["active"]
     line = "=" * 92
+    if load is not None and load.get("banner"):
+        print(load["banner"])
     print(line)
     print("1. CHANNEL CONDITIONS  (optical energy link, master -> slave)")
     print(line)
@@ -305,7 +345,9 @@ def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None =
     print(f"  Per-slot outcome ({N} slots):  " + ", ".join(f"{k} {v}" for k, v in counts.items() if v))
     expl = {"BALANCED": "master gave energy until m = a*s", "CAP": "slave battery full on arrival",
             "UNBALANCED": "not converged or another constraint", "NOT_WORTH": "m >= a*s, keeping the Joule is better",
-            "CAP_BLOCKED": "would pay but slave battery is full", "BLOCKED": "would pay but another constraint binds"}
+            "CAP_BLOCKED": "would pay but slave battery is full", "BLOCKED": "would pay but another constraint binds",
+            "MPPT_CAP": "delta > 0 but the MPPT input rating (S5) limits the stored energy",
+            "FEED": "delta > 0 in a silent slot: energy stored for later / electronics drain"}
     for k, v in counts.items():
         if v:
             print(f"    {k:<12s} {v:>3d} slots : {expl[k]}")
@@ -315,7 +357,15 @@ def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None =
     print(line)
     print("  harvested %.1f = master data %.1f + sent %.1f (+ master leftover %.2g)" % (L["harvested"], L["master_data"], L["sent"], L["master_leftover"]))
     print("  sent %.1f -> channel loss %.1f, recharge loss %.1f, stored %.1f" % (L["sent"], L["channel_loss"], L["recharge_loss"], L["stored"]))
-    print("  stored %.1f = slave data %.1f + battery change %.1f" % (L["stored"], L["slave_data"], L["battery_change"]))
+    if L["slave_overhead"] > 0:
+        print("  stored %.1f + initial excess %.1f = slave data %.1f + slave electronics %.4g + final level above floor %.3g"
+              % (L["stored"], jp.g_init, L["slave_data"], L["slave_overhead"], r.b[-1] - jp.B_min))
+        if load is not None:
+            comp = out["load"]["components_J"]
+            print("  slave electronics (non-TX) %.4g J = " % L["slave_overhead"]
+                  + ", ".join(f"{k} {v:.4g}" for k, v in comp.items()))
+    else:
+        print("  stored %.1f = slave data %.1f + battery change %.1f" % (L["stored"], L["slave_data"], L["battery_change"]))
     print()
     print(line)
     print("5. ACTIVE CONSTRAINTS")
@@ -323,6 +373,19 @@ def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None =
     print(f"  master taps closed (F=0): {A['master_taps_closed']}/{A['master_taps']} | slave at floor: {A['slave_at_floor']}/{A['slots']}"
           f" | slave at ceiling on arrival: {A['slave_at_ceiling']}/{A['slots']}")
     print(f"  P=0 slots: {A['P_zero_slots']} | Pbar=0 slots: {A['Pbar_zero_slots']} | delta=0 slots: {A['delta_zero_slots']}")
+    if load is not None:
+        mc, wn = out["mppt_cap"], out["window"]
+        if mc["active"]:
+            print(f"  MPPT cap (S5): binds in {mc['binding_slots']}/{N} slots | largest stored energy {mc['max_stored_J']:.4g} J "
+                  f"= {100 * mc['max_fraction_of_cap']:.1f}% of capA = {mc['capA_J']:.4g} J")
+        else:
+            print("  MPPT cap (S5): not set")
+        print(f"  battery window: W = {wn['W']:.4g} J | solution needs max(b_peak) - B_min = {wn['max_b_peak_minus_Bmin']:.4g} J "
+              f"| profile W_req = {wn['W_req']:.4g} J (design x margin {wn['W_design']:.4g} J) -> "
+              + ("window covers W_req" if wn["covers_W_req"] else "WINDOW BELOW W_req (the placeholder-TX profile would not fit)"))
+        sz = out["load"]["sizing"]
+        print(f"  supercap sizing: C >= {sz['C_req']:.3f} F for the {load['hw'].v_store_min}-{load['hw'].v_store_max} V range "
+              f"-> nearest standard {sz['C_std']} F (window {sz['W_std']:.3f} J)")
     print()
     print(line)
     print("6. SOLVER")

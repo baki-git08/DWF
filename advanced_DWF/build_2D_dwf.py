@@ -26,6 +26,9 @@ Slave  : harvests nothing. Of the delta_i sent, only
          where alpha_i = exp(-c*d) is the Beer-Lambert transmittance of the water path
          and beta is the battery-recharging efficiency (two losses in series).
          It spends tau*Pbar_i on data sent back to the master (power Pbar_i).
+         Optional slave load (off by default): its electronics (camera, MCU, memory, MPPT) burn a known
+         c_i >= 0 Joules per slot, ON or silent, and the MPPT accepts at most capA_k stored Joules per
+         slot (JointParams.slave_overhead_J, mppt_cap_J; see slave_load.attach_slave_load()).
 
 Objective (weighted sum-rate, nats):
 
@@ -50,11 +53,13 @@ of a link is h*P, which is exactly the SNR appearing inside ln(1 + h*P).
     W = B_max-B_min W          usable slave window
     tau*P_i        xm(i)       master data energy in slot i
     tau*Pbar_i     xs(i)       slave  data energy in slot i
+    c_i            cS[i]       slave electronics energy in slot i (jp.overhead, zeros without a load)
+    capA_k         capA[k]     MPPT stored-energy cap of slot k (jp.capA, inf without a cap)
 
 Energy balance (this is how xm and xs are DEFINED in the code):
 
     tau*P_i    = E_i + F_{i-1} - F_i - delta_i              (master: harvest + carry in - carry out - shared)
-    tau*Pbar_i = a_i*delta_i + Gt_{i-1} - Gt_i               (slave : arrival  + carry in - carry out)
+    tau*Pbar_i = a_i*delta_i + Gt_{i-1} - Gt_i - c_i         (slave : arrival  + carry in - carry out - electronics)
 
 with F_{-1} = F_{N-1} = 0 (nothing before the first / after the last slot) and
 Gt_{-1} = b0 - B_min, Gt_{N-1} = 0 (all energy is used by the end).
@@ -72,8 +77,12 @@ construction, and the original inequality constraints become simple BOUNDS:
          (checked at ARRIVAL: within a slot the level only falls after the arrival)
     (S3) slave power        Pbar_i >= 0                xs >= 0                      eta_bar_i
     (S4) schedule           Pbar_i = 0 if s_i = 0      xs = 0 in silent slots       (JointParams.slave_schedule)
-         A silent slot still receives (delta_i) and stores energy; it is a pure pass-through for
-         the slave battery. Moves whose slave end is a silent slot are skipped in joint_dwf().
+         A silent slot still receives (delta_i) and stores energy; with a slave load it also DRAINS c_i,
+         so the battery falls through a silent run (Gt_i = Gt_{i-1} + a_i delta_i - c_i).
+         Moves whose slave end is a silent slot are skipped in joint_dwf().
+    (S5) MPPT input rating  a_k*delta_k <= capA_k      stored energy per slot       (JointParams.mppt_cap_J)
+         One more linear bound on d[k] (inf = off); added through apply() and in moves 1-5.
+    The ceiling is checked at ARRIVAL and the floor at the END of the slot (arrival first, drain after).
 
 Whenever a move is CLIPPED by one of these bounds, that constraint is active and its
 multiplier is >= 0 (complementary slackness). The multipliers are never computed
@@ -96,7 +105,9 @@ Marginal value of one Joule of data energy (derivative of the rate w.r.t. energy
 
 5. ALGORITHM (block coordinate ascent over "taps")
 --------------------------------------------------
-Start at "spend what you harvest, share nothing" (f = 0, g = 0, d = 0). Repeatedly sweep
+Start at "spend what you harvest, share nothing" (f = 0, g = 0, d = 0); with a slave load c > 0 that start is
+infeasible (g[N] = 0 is fixed), so a just-in-time start is built instead (d[k] = max(0, c_k - g[k])/a_k; if it
+breaks a bound, an LP start; else InfeasibleSlaveBudget).  Repeatedly sweep
 the slots forward and backward; at each slot try a list of MOVES. A move changes one or
 two flow variables by t Joules, and t is chosen as
 
@@ -217,6 +228,11 @@ class JointParams:
         slave's data power to zero in slot i (constraint S4); it still receives and stores energy.
         A pattern shorter than N repeats cyclically ([1, 0] = transmit every other slot).
         None (default) = always allowed. Stored as a boolean array of length N.
+    slave_overhead_J : c_i >= 0 [J] per slot, scalar or length N. Non-TX electronics energy the slave
+        burns in slot i (camera + MCU + memory + MPPT), see slave_load.attach_slave_load(). Enters the
+        slave balance as  tau*Pbar_i = a_i*delta_i + Gt_{i-1} - Gt_i - c_i.  None (default) = 0.
+    mppt_cap_J : S5, stored-energy cap per slot [J] (scalar or length N): a_k*delta_k <= capA_k
+        (MPPT input rating).  None (default) = no cap.
     """
     master: MasterParams
     alpha: np.ndarray | float = 0.368     # PLACEHOLDER  exp(-0.2 1/m * 5 m)
@@ -228,6 +244,8 @@ class JointParams:
     theta1: float = 1.0                   # weight of master rate
     theta2: float = 3.0                   # weight of slave rate
     slave_schedule: np.ndarray | list | None = None   # 1 = slave may transmit, 0 = silent (None = always 1)
+    slave_overhead_J: np.ndarray | float | None = None   # c_i: non-TX slave electronics energy per slot (None = 0)
+    mppt_cap_J: np.ndarray | float | None = None         # S5: a_k*delta_k <= capA_k, stored energy per slot (None = inf)
 
     def __post_init__(self):
         """Broadcast scalars to one value per slot and validate the model assumptions."""
@@ -261,6 +279,21 @@ class JointParams:
         # With no ON slot the slave could never spend any energy it holds above the floor.
         if not self.slave_schedule.any() and self.b0 > self.B_min:
             raise ValueError("slave_schedule has no transmit slot but b0 > B_min")
+        # Slave electronics drain c_i >= 0 and MPPT stored-energy cap capA_k > 0 (None keeps today's model).
+        if self.slave_overhead_J is not None:
+            c = np.asarray(self.slave_overhead_J, float)
+            if c.ndim and c.size != n:
+                raise ValueError(f"slave_overhead_J needs 1 or N = {n} entries, got {c.size}")
+            self.slave_overhead_J = np.broadcast_to(c, (n,)).copy()
+            if not np.all(np.isfinite(self.slave_overhead_J)) or np.any(self.slave_overhead_J < 0):
+                raise ValueError("slave_overhead_J must be finite and >= 0")
+        if self.mppt_cap_J is not None:
+            cp = np.asarray(self.mppt_cap_J, float)
+            if cp.ndim and cp.size != n:
+                raise ValueError(f"mppt_cap_J needs 1 or N = {n} entries, got {cp.size}")
+            self.mppt_cap_J = np.broadcast_to(cp, (n,)).copy()
+            if np.any(np.isnan(self.mppt_cap_J)) or np.any(self.mppt_cap_J < 0):
+                raise ValueError("mppt_cap_J must be >= 0 (use None or inf for no cap)")
 
     @property
     def a(self) -> np.ndarray:            # net gain of the down tap
@@ -269,6 +302,16 @@ class JointParams:
         One Joule sent by the master (delta_i) becomes a_i Joules in the slave battery.
         """
         return self.beta * self.alpha   # <- 
+
+    @property
+    def overhead(self) -> np.ndarray:     # c_i, always an array
+        """Slave non-TX electronics energy c_i [J] per slot (zeros when no load is attached)."""
+        return np.zeros(self.master.N) if self.slave_overhead_J is None else self.slave_overhead_J
+
+    @property
+    def capA(self) -> np.ndarray:         # S5 cap, always an array
+        """MPPT stored-energy cap per slot [J] (inf when no cap)."""
+        return np.full(self.master.N, np.inf) if self.mppt_cap_J is None else self.mppt_cap_J
 
     @property
     def W(self) -> float:                 # usable battery window
@@ -307,6 +350,8 @@ class JointResult:
     objective: float          # th1*rate_master + th2*rate_slave
     iters: int                # number of sweeps used
     converged: bool           # True if the stop rule (and polish) was met before max_iter
+    overhead: np.ndarray | None = None   # c_i  slave non-TX electronics energy per slot [J] (zeros if no load)
+    start: str = "share-nothing"         # how the start point was built: share-nothing | just-in-time | lp-fallback
 
 
 @dataclass
@@ -330,6 +375,9 @@ class PhysicalStorageResult:
     overflow_energy: float             # [J] sum(overflow); ~0 once beta is calibrated to the chain
     floor_violations: int              # slots where b_phys < B_min
     ceiling_violations: int            # slots where b_peak_phys > B_max
+    overflow_mppt: np.ndarray = None   # [J] per slot stored energy above the MPPT input cap capA (clipped; 0 without a cap)
+    overflow_mppt_energy: float = 0.0  # [J] sum(overflow_mppt); 0 at a calibrated fixed point with S5 active in the solver
+    overhead: np.ndarray = None        # [J] c_i subtracted from the re-simulated battery (zeros without a load)
 
 
 def physical_stored_power(
@@ -351,6 +399,9 @@ def physical_stored_power(
 
     Pure post-processing: does not modify jp or r, and never feeds back into joint_dwf().
 
+    With a slave load attached (jp.slave_overhead_J, jp.mppt_cap_J) the re-simulated battery also
+    subtracts c_i, and the stored energy is clipped to the MPPT cap (overflow_mppt).
+
     battery_tol_J : numerical tolerance [J] used for the overflow clip and the floor/ceiling
         violation counts below. joint_dwf() only converges to within `tol * scale` (its own `tol`
         argument, default 1e-10 * mean harvested energy per slot) -- typically ~1e-7 to 1e-6 J at
@@ -365,14 +416,20 @@ def physical_stored_power(
         r.arrived_power, wavelength_nm, mppt_efficiency,
         fill_factor=fill_factor, temp_K=temp_K,
     )
-    stored_power_phys = chain.mppt_output_power
-    stored_energy_phys = tau * stored_power_phys
-
+    stored_raw = chain.mppt_output_power                          # what the photodiode + MPPT chain would deliver
     with np.errstate(divide="ignore", invalid="ignore"):
-        eff_phys = np.where(r.arrived_power > 0, stored_power_phys / np.where(r.arrived_power > 0, r.arrived_power, 1.0), np.nan)
+        eff_phys = np.where(r.arrived_power > 0, stored_raw / np.where(r.arrived_power > 0, r.arrived_power, 1.0), np.nan)
+    # MPPT input rating (S5): physical_chain.py does not saturate, so clip here.  The energy above
+    # capA is rejected (overflow_mppt); eff_phys above stays the UNCLIPPED chain gain so calibration is stable.
+    capA = jp.capA
+    excess = tau * stored_raw - capA                              # inf cap -> -inf -> no clip
+    overflow_mppt = np.where(excess > battery_tol_J, excess, 0.0)
+    stored_energy_phys = np.where(overflow_mppt > 0, capA, tau * stored_raw)
+    stored_power_phys = stored_energy_phys / tau
+    cS = jp.overhead                                              # slave electronics drain c_i
 
-    # Re-simulate the slave battery: same spending (tau*Pbar) as the solver's solution, but the
-    # PHYSICAL arrival instead of a_i*delta_i.  Starts at b0 (same initial charge as the solver).
+    # Re-simulate the slave battery: same spending (tau*Pbar) and electronics drain c_i as the solver's
+    # solution, but the PHYSICAL arrival instead of a_i*delta_i.  Starts at b0 (same initial charge).
     tau_pbar = r.Pbar * tau                                       # tau*Pbar_i, the slave's actual spend (unchanged)
     b_prev_phys = np.empty(m.N)
     b_phys = np.empty(m.N)
@@ -380,7 +437,7 @@ def physical_stored_power(
     level = jp.b0                                                 # running battery level, starts at b0
     for i in range(m.N):
         b_prev_phys[i] = level
-        level = level + stored_energy_phys[i] - tau_pbar[i]
+        level = level + stored_energy_phys[i] - tau_pbar[i] - cS[i]
         if level > jp.B_max + battery_tol_J:                      # a real battery can't hold more than B_max
             overflow[i] = level - jp.B_max
             level = jp.B_max
@@ -398,6 +455,9 @@ def physical_stored_power(
         overflow_energy=float(overflow.sum()),
         floor_violations=int(np.sum(b_phys < jp.B_min - battery_tol_J)),
         ceiling_violations=int(np.sum(b_peak_phys > jp.B_max + battery_tol_J)),
+        overflow_mppt=overflow_mppt,
+        overflow_mppt_energy=float(overflow_mppt.sum()),
+        overhead=cS.copy(),
     )
 
 
@@ -420,6 +480,9 @@ def solve_with_physical_chain(
     of iterations. At the fixed point, a_i*delta_i/tau == mppt_output_power_i exactly, so the
     solver's battery (r.b, r.b_peak) matches the physically re-simulated one (ph.b_phys,
     ph.b_peak_phys), and the existing B_min/B_max constraints are enforced against real energy.
+
+    The slave load (jp.slave_overhead_J) and the MPPT cap (jp.mppt_cap_J) are carried unchanged through
+    the loop (they do not depend on beta); only beta_i is calibrated.
 
     Slots with delta_i == 0 have nothing to calibrate on (arrived_power_i == 0 -> eff_phys_i is
     NaN); their beta is left unchanged from the previous iterate.
@@ -449,9 +512,110 @@ def solve_with_physical_chain(
 
 
 # ----------------------------------------------------------------------------
+# Feasible start when the slave has a known drain c_i > 0
+# ----------------------------------------------------------------------------
+class InfeasibleSlaveBudget(ValueError):
+    """No schedule can keep the slave alive: the slave drain c_i, the battery window W, the MPPT cap
+    or the master's harvest make S1-S5 (with g[N] = 0) unsatisfiable.  Constraints are never relaxed."""
+
+
+def _jit_start(jp: "JointParams"):
+    """Just-in-time start: the master sends in slot k exactly what the slave is short of there.
+
+        f = 0 (master spends what it harvests),  xs = 0 (no slave data energy yet)
+        d[k]   = max(0, c_k - g[k]) / a_k
+        g[k+1] = g[k] + a_k d[k] - c_k          (>= 0 by construction)
+    Any initial excess beyond the total drain (d == 0 everywhere) is spent as data in the first ON slot.
+    Returns (d, g, violations); violations = [(slot, reason)] for bounds the start breaks (empty = feasible).
+    """
+    m = jp.master
+    N, E, a, cS, capA, W = m.N, m.E, jp.a, jp.overhead, jp.capA, jp.W
+    d = np.zeros(N)
+    g = np.zeros(N + 1)
+    g[0] = jp.g_init
+    viol = []
+    for k in range(N):
+        short = max(0.0, cS[k] - g[k])
+        if short > 0.0:
+            if a[k] <= 0.0:
+                viol.append((k, f"a_{k} = 0 but the slave is short {short:.6g} J (c_{k} = {cS[k]:.6g} J, carry {g[k]:.6g} J): no energy can land"))
+                g[k + 1] = 0.0
+                continue
+            d[k] = short / a[k]
+            g[k + 1] = 0.0                                   # g[k] + a_k d_k - c_k = 0 exactly
+        else:
+            g[k + 1] = g[k] - cS[k]
+        if d[k] > E[k] * (1 + 1e-12) + 1e-12:
+            viol.append((k, f"harvest too small: the slave needs delta_{k} = {d[k]:.6g} J but the master harvests E_{k} = {E[k]:.6g} J "
+                            f"(with f = 0; earlier carry is tried by the LP fallback)"))
+        if g[k] + a[k] * d[k] > W * (1 + 1e-12) + 1e-12:
+            viol.append((k, f"window W = {W:.6g} J is below the energy needed on arrival in slot {k}: {g[k] + a[k] * d[k]:.6g} J"
+                            f" (c_{k} = {cS[k]:.6g} J)"))
+        if a[k] * d[k] > capA[k] * (1 + 1e-12) + 1e-12:
+            viol.append((k, f"MPPT cap capA_{k} = {capA[k]:.6g} J is below the stored energy needed {a[k] * d[k]:.6g} J (c_{k} = {cS[k]:.6g} J)"))
+    left = g[N]
+    if left > 1e-12 * max(1.0, jp.g_init):
+        j = int(np.argmax(jp.slave_schedule)) if jp.slave_schedule.any() else -1
+        if j < 0:
+            viol.append((N - 1, f"initial charge exceeds the total drain by {left:.6g} J and no ON slot can spend it"))
+        else:
+            g[j + 1:] -= left                               # xs(j) = left: spend it as data in the first ON slot
+            g[N] = 0.0
+    else:
+        g[N] = 0.0
+    return d, g, viol
+
+
+def _lp_start(jp: "JointParams"):
+    """Feasibility LP (scipy) with the constraints of reference_solution_joint: a start that may borrow
+    against future harvest through the master carry f.  Returns (d, f, g) or None if infeasible."""
+    try:
+        from scipy.optimize import linprog
+    except ImportError:                                        # pragma: no cover
+        return None
+    m = jp.master
+    N, E, a, cS, capA = m.N, m.E, jp.a, jp.overhead, jp.capA
+    tx = jp.slave_schedule
+    nv = 3 * N                                                # variables: x (master data), d, xb (slave data)
+    ix, idl, ixb = np.arange(N), N + np.arange(N), 2 * N + np.arange(N)
+    L = np.tril(np.ones((N, N)))                              # cumulative-sum operator
+    Lm = np.tril(np.ones((N, N)), -1)                         # strictly lower: cum up to k-1
+    Z = np.zeros((N, N))
+    A_ub = [np.hstack([L, L, Z]),                             # M1: cum(x+d) <= cum(E)
+            np.hstack([Z, -L * a, L]),                        # S1: b0 + cum(a d - xb - c) >= B_min
+            np.hstack([Z, L * a, -Lm])]                       # S2: b0 + cum(a d)_k - cum(xb + c)_{k-1} <= B_max
+    b_ub = [np.cumsum(E), jp.b0 - jp.B_min - np.cumsum(cS), jp.B_max - jp.b0 + Lm @ cS]
+    if np.isfinite(m.E_max):                                  # M2: cum(E) - cum(x+d) <= E_max - E_{k+1}
+        A_ub.append(np.hstack([-L[:-1], -L[:-1], Z[:-1]]))
+        b_ub.append(m.E_max - E[1:] - np.cumsum(E)[:-1])
+    A_eq = np.vstack([np.concatenate([np.ones(N), np.ones(N), np.zeros(N)]),     # master uses all its energy
+                      np.concatenate([np.zeros(N), a, -np.ones(N)])])              # slave terminal g[N] = 0
+    b_eq = np.array([E.sum(), jp.B_min - jp.b0 + cS.sum()])
+    bounds = [(0, None)] * (2 * N) + [(0, 0) if not tx[i] else (0, None) for i in range(N)]
+    for i in range(N):                                        # S5 as an upper bound on d
+        if np.isfinite(capA[i]):
+            bounds[N + i] = (0, capA[i] / a[i] if a[i] > 0 else 0.0)
+    res = linprog(np.zeros(nv), A_ub=np.vstack(A_ub), b_ub=np.concatenate(b_ub),
+                  A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs")
+    if res.status != 0:
+        return None
+    x, dl, xb = res.x[ix], res.x[idl], res.x[ixb]
+    d = np.maximum(dl, 0.0)
+    f = np.zeros(N + 1)
+    f[1:] = np.maximum(np.cumsum(E - x - dl), 0.0)
+    f[N] = 0.0
+    g = np.zeros(N + 1)
+    g[0] = jp.g_init
+    g[1:] = np.maximum(jp.g_init + np.cumsum(a * dl - xb - cS), 0.0)
+    g[N] = 0.0
+    return d, f, g
+
+
+# ----------------------------------------------------------------------------
 # Core solver
 # ----------------------------------------------------------------------------
-def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> JointResult:
+def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000,
+              cross_run: bool | None = None) -> JointResult:
     """Solve the master + slave problem by directional water-filling (block coordinate ascent).
 
     Problem solved (see module docstring, sections 1-3):
@@ -479,6 +643,9 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
     jp : JointParams
     tol : relative stop tolerance (moves are compared with tol * scale, scale = mean(E) in J)
     max_iter : safety cap on the number of sweeps (one sweep = one pass over all slots)
+    cross_run : add polish() family D (delta shift between NON-adjacent slots through the slave carry).
+        None (default) = on only when a slave load c_i > 0 is attached, so the no-load path stays
+        bit-identical to the original solver.
 
     Returns
     -------
@@ -490,6 +657,10 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
     th1, th2, W = jp.theta1, jp.theta2, jp.W
     capM = m.cap                                  # E_max - E_{n+1}, n = 0..N-2
     tx = jp.slave_schedule                        # tx[i] False -> Pbar_i = 0 forced (S4); slave only stores
+    cS = jp.overhead                              # c_i: slave non-TX electronics energy per slot [J] (zeros = no load)
+    capA = jp.capA                                # S5: a_k*d_k <= capA_k (inf = no cap)
+    has_load = bool(np.any(cS > 0))
+    use_cross = has_load if cross_run is None else bool(cross_run)
 
     # ---- state: the three families of flow variables (all in Joules) -------------------------
     f = np.zeros(N + 1)                           # f[k+1] = master carry over tap k
@@ -505,12 +676,30 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
         g[1:int(np.argmax(tx)) + 1] = g[0]
     d = np.zeros(N)                               # delta
     #   d[k] = delta_k = energy the master sends over the down tap in slot k.
+    start = "share-nothing"
+    if has_load:
+        #   With c > 0 "share nothing" is infeasible (g[N] = 0 is fixed): the slave must be fed to cover
+        #   its drain.  Just-in-time start (module docstring section 5); if it breaks a bound (e.g. harvest
+        #   too small in a slot with f = 0) try an LP that may borrow through f; otherwise raise.
+        d0, g0, viol = _jit_start(jp)
+        if not viol:
+            d[:], g[:], start = d0, g0, "just-in-time"
+        else:
+            lp = _lp_start(jp)
+            if lp is None:
+                raise InfeasibleSlaveBudget(
+                    "no feasible schedule keeps the slave alive (S1-S5, g[N] = 0): "
+                    + "; ".join(f"slot {k}: {why}" for k, why in viol[:3])
+                    + (f" (+{len(viol) - 3} more)" if len(viol) > 3 else "")
+                    + ".  The LP feasibility check (borrowing via the master carry) is infeasible too.")
+            d[:], f[:], g[:] = lp
+            start = "lp-fallback"
 
     # ---- energy balance: these two lambdas DEFINE the data energies -----------------------------
     xm = lambda i: E[i] + f[i] - f[i + 1] - d[i]          # master data energy
     #   tau*P_i = E_i + F_{i-1} - F_i - delta_i    (harvest + carry in - carry out - shared)
-    xs = lambda i: a[i] * d[i] + g[i] - g[i + 1]          # slave  data energy
-    #   tau*Pbar_i = a_i*delta_i + Gt_{i-1} - Gt_i (arrival + carry in - carry out)
+    xs = lambda i: a[i] * d[i] + g[i] - g[i + 1] - cS[i]  # slave  data energy
+    #   tau*Pbar_i = a_i*delta_i + Gt_{i-1} - Gt_i - c_i (arrival + carry in - carry out - electronics drain)
 
     scale = max(float(E.mean()), 1.0)             # typical energy per slot [J]; makes tol relative
 
@@ -568,6 +757,7 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
         * g[q]              >= 0                         S1      (slave floor)
         * d[q]              >= 0                         M3      (delta >= 0)
         * g[q] + a[q]*d[q]  <= W                         S2      (slave arrival cap at slot q)
+        * a[q]*d[q]         <= capA[q]                   S5      (MPPT input rating, only if a cap is set)
         * src / snk data energy >= 0                     M3, S3  (P >= 0, Pbar >= 0)
 
         Parameters
@@ -596,6 +786,8 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
             lim(d[q], c, 0.0, np.inf); arr[q] = arr.get(q, 0.0) + a[q] * c
         for q, c in arr.items():
             lim(g[q] + a[q] * d[q], c, -np.inf, W)          # slave arrival cap
+        for q, c in dch:
+            lim(a[q] * d[q], a[q] * c, -np.inf, capA[q])    # S5: stored energy per slot <= capA_q
         lim(src[0], src[1], 0.0, np.inf)
         lim(snk[0], snk[1], 0.0, np.inf)
         if lo > hi:
@@ -622,7 +814,7 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
 
         and t is chosen by step() on the two end nodes, then clipped by apply().
 
-        Three families of paths are tried
+        Three families of paths are tried (plus family D when a slave load is attached)
         ---------------------------------
         A. master chain   master slot i -> master slot j   (through dead master slots)   f[i+1..j] += t
         B. slave chain    slave slot i  -> slave slot j    (through dead slave slots)    g[i+1..j] += t
@@ -630,9 +822,30 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
                           (delta_k += t, master carries and slave carries adjusted so that every
                           intermediate slot keeps its spending)
 
+        D. delta shift   d[k] <-> d[j] (k+1 < j) through the slave carry g[k+1..j]  (cross_run only)
+                          effect  : d[k] += t, g[k+1..j] += a_k t, d[j] -= (a_k/a_j) t ;
+                                    xm(k) -= t, xm(j) += (a_k/a_j) t ; every xs(q) unchanged
+                          equation: nu_k = (a_k/a_j)-weighted nu_j  (the same step() as move (10))
+                          bounds  : d[k], d[j] >= 0, g >= 0, arrival caps S2 at k..j, S5, xm >= 0 (via apply)
+                          why     : with a slave load, silent slots now drain, so energy is routed through runs
+                                    of silent slots.  Move (10) only shifts between ADJACENT slots; an
+                                    intermediate slot whose master level is high blocks the adjacent chain
+                                    although the end-to-end shift pays (README section 10, same idea as A-C).
+
         Returns the largest |t| applied, so the caller knows whether anything moved.
         """
         big = 0.0
+        if use_cross:
+            for k in range(N - 2):                                  # D. delta shift across a run (k, j = k+2 ..)
+                if a[k] <= 0:
+                    continue
+                for j in range(k + 2, N):
+                    if a[j] <= 0:
+                        continue
+                    rr = a[k] / a[j]
+                    t = step(th1, h[k], xm(k), 1, th1, h[j], xm(j), rr)
+                    big = max(big, apply([], [(q, a[k]) for q in range(k + 1, j + 1)],
+                                         [(k, 1.0), (j, -rr)], (xm(k), -1.0), (xm(j), rr), t))
         for i in range(N):                                          # master chain i -> j
             j = i + 2                                               # needs >= 1 intermediate slot
             while j <= N - 1 and dead(xm(j - 1)):                   # extend while the intermediate is dead
@@ -706,7 +919,7 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
             if ak > 0 and tx[k]:
                 x, xb = xm(k), xs(k)
                 t = step(th1, h[k], x, 1, th2, hb[k], xb, ak)
-                t = min(max(t, max(-d[k], -xb / ak)), min(x, (W - g[k]) / ak - d[k]))
+                t = min(max(t, max(-d[k], -xb / ak)), min(x, (W - g[k]) / ak - d[k], capA[k] / ak - d[k]))
                 d[k] += t; big = max(big, abs(t))
             # (2) IN-SWAP  M_k -> S_{k-1}: delta_k += t, carry g_{k-1} -= a_k t
             #     (needed when the slave arrival cap g_{k-1}+a_k delta_k <= W is tight)
@@ -718,7 +931,7 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
             if ak > 0 and k >= 1 and tx[k - 1]:
                 x, xb1 = xm(k), xs(k - 1)
                 t = step(th1, h[k], x, 1, th2, hb[k - 1], xb1, ak)
-                t = min(max(t, max(-d[k], -xb1 / ak)), min(x, g[k] / ak))
+                t = min(max(t, max(-d[k], -xb1 / ak)), min(x, g[k] / ak, capA[k] / ak - d[k]))
                 d[k] += t; g[k] -= ak * t; big = max(big, abs(t))
             # (3) MASTER pass-through  M_{k-1} -> S_k  (f_{k-1}, delta_k up together)
             #     lets energy cross a master slot that has P_k = 0 on its way to the slave
@@ -731,7 +944,7 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
                 xa, xb = xm(k - 1), xs(k)
                 t = step(th1, h[k - 1], xa, 1, th2, hb[k], xb, ak)
                 lo = max(-f[k], -d[k], -xb / ak)
-                hi = min(capM[k - 1] - f[k], xa, (W - g[k]) / ak - d[k])
+                hi = min(capM[k - 1] - f[k], xa, (W - g[k]) / ak - d[k], capA[k] / ak - d[k])
                 t = min(max(t, lo), hi)
                 f[k] += t; d[k] += t; big = max(big, abs(t))
             # (4) MASTER out-swap  M_{k+1} -> S_k  (carry f_k down, delta_k up)
@@ -744,7 +957,7 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
                 xa, xb = xm(k + 1), xs(k)
                 t = step(th1, h[k + 1], xa, 1, th2, hb[k], xb, ak)
                 lo = max(-d[k], -xb / ak, -(capM[k] - f[k + 1]))
-                hi = min(f[k + 1], xa, (W - g[k]) / ak - d[k])
+                hi = min(f[k + 1], xa, (W - g[k]) / ak - d[k], capA[k] / ak - d[k])
                 t = min(max(t, lo), hi)
                 f[k + 1] -= t; d[k] += t; big = max(big, abs(t))
             # (5) SLAVE pass-through  M_k -> S_{k+1} across slave slot k
@@ -757,7 +970,8 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
                 xa, xb = xm(k), xs(k + 1)
                 t = step(th1, h[k], xa, 1, th2, hb[k + 1], xb, ak)
                 lo = max(-d[k], -g[k + 1] / ak, -xb / ak)
-                hi = min(xa, (W - g[k]) / ak - d[k], (W - a[k + 1] * d[k + 1] - g[k + 1]) / ak)
+                hi = min(xa, (W - g[k]) / ak - d[k], (W - a[k + 1] * d[k + 1] - g[k + 1]) / ak,
+                         capA[k] / ak - d[k])
                 t = min(max(t, lo), hi)
                 d[k] += t; g[k + 1] += ak * t; big = max(big, abs(t))
             if k == N - 1:
@@ -838,7 +1052,7 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000) -> J
         sent_power=delta / tau, arrived_power=jp.alpha * delta / tau,
         stored_power=a * delta / tau, rx_master=h * P, rx_slave=hb * Pbar,
         rate_master=r_m, rate_slave=r_s, objective=th1 * r_m + th2 * r_s,
-        iters=it, converged=converged)
+        iters=it, converged=converged, overhead=cS.copy(), start=start)
 
 
 # ----------------------------------------------------------------------------
@@ -882,8 +1096,14 @@ def check_kkt_joint(jp: JointParams, r: JointResult, tol: float = 1e-6) -> dict:
         delta_cond_violation_active  max |m_k - a_k s_k|/m_k where delta>0 and cap slack   [~0]
         delta_cond_violation_inactive max of (a_k s_k - m_k)/m_k where delta=0             [~0]
         arrival_cap_active_slots     number of slots where the slave ceiling is reached
+        slave_overhead_total_J       sum c_i                      [J, 0 without a load]
+        max_cap_violation_J          max(a_k delta_k - capA_k, 0) [~0, S5]
+        mppt_cap_active_slots        slots where S5 binds (delta condition skipped there)
+        min_slave_level_margin_J     min(min b - B_min, B_max - max b_peak)   [>= 0]
+        slave_ledger_error_J         (b0-B_min) + sum a delta - sum c - sum tau Pbar - (b_N-1 - B_min)  [~1e-9]
     """
     m = jp.master
+    jm_tau = m.tau
     h, hb, a = m.h, jp.h_bar, jp.a
     mk = jp.theta1 * h / (2 * (1 + h * r.P))                     # m_k  = master marginal value per Joule
     sk = jp.theta2 * hb / (2 * (1 + hb * r.Pbar))                # s_k  = slave  marginal value per Joule
@@ -892,6 +1112,10 @@ def check_kkt_joint(jp: JointParams, r: JointResult, tol: float = 1e-6) -> dict:
     on = (r.delta > 1e-7 * max(m.E.mean(), 1.0)) & tx            # shared AND slave transmits (local condition valid)
     gap = np.where(tx, gap, np.inf)                              # silent slots: energy is valued at a later slot, skip
     cap_slack = r.b_peak < jp.B_max - 1e-6                       # slave ceiling NOT reached (mu_bar = 0)
+    capA = jp.capA
+    stored = a * r.delta
+    s5_bind = np.isfinite(capA) & (stored >= capA - 1e-6 * np.maximum(np.where(np.isfinite(capA), capA, 1.0), 1.0))
+    cap_slack = cap_slack & ~s5_bind                             # S5 binds -> its multiplier is nonzero, skip the equality
     v_on = np.abs(gap[on & cap_slack]).max() if np.any(on & cap_slack) else 0.0     # equality where delta>0
     v_off = np.maximum(-gap[~on], 0.0).max() if np.any(~on) else 0.0                # inequality where delta=0
     return {
@@ -905,9 +1129,16 @@ def check_kkt_joint(jp: JointParams, r: JointResult, tol: float = 1e-6) -> dict:
         "delta_active_slots": int(on.sum()),
         "delta_cond_violation_active": float(v_on),   # ~0
         "delta_cond_violation_inactive": float(v_off),# ~0
-        "arrival_cap_active_slots": int((~cap_slack).sum()),
+        "arrival_cap_active_slots": int((r.b_peak >= jp.B_max - 1e-6).sum()),                # slave ceiling reached
         "slave_silent_slots": int((~tx).sum()),                                              # schedule s_i = 0
         "max_Pbar_in_silent_slots": float(r.Pbar[~tx].max()) if np.any(~tx) else 0.0,       # S4: ~0
+        # slave electronics load (c_i) and MPPT cap (S5)
+        "slave_overhead_total_J": float(jp.overhead.sum()),
+        "max_cap_violation_J": float(max(np.max(np.where(np.isfinite(capA), stored - capA, -np.inf)), 0.0)) if np.isfinite(capA).any() else 0.0,   # S5: ~0
+        "mppt_cap_active_slots": int(s5_bind.sum()),
+        "min_slave_level_margin_J": float(min(r.b.min() - jp.B_min, jp.B_max - r.b_peak.max())),         # >= 0
+        "slave_ledger_error_J": float((jp.b0 - jp.B_min) + stored.sum() - jp.overhead.sum()
+                                       - jm_tau * r.Pbar.sum() - (r.b[-1] - jp.B_min)),                # ~0 (1e-9)
     }
 
 
@@ -926,8 +1157,12 @@ def reference_solution_joint(jp: JointParams):
         master causality   cum(x+dl)_k <= cum(E)_k                    M1  (F_k >= 0)
         master uses all    cum(x+dl)_{N-1} == cum(E)_{N-1}            F_{N-1} = 0
         master ceiling     cum(E)_k - cum(x+dl)_k <= E_max - E_{k+1}  M2  (only if E_max finite)
-        slave floor        b0 + cum(a*dl - xb)_k >= B_min             S1  (b_k >= B_min)
-        slave ceiling      b0 + cum(a*dl)_k - cum(xb)_{k-1} <= B_max  S2  (b_{k-1} + a_k dl_k <= B_max)
+        slave floor        b0 + cum(a*dl - xb - c)_k >= B_min         S1  (b_k >= B_min)
+        slave ceiling      b0 + cum(a*dl)_k - cum(xb + c)_{k-1} <= B_max  S2  (b_{k-1} + a_k dl_k <= B_max)
+        slave terminal     b0 + cum(a*dl - xb - c)_{N-1} == B_min    g[N] = 0 (same as joint_dwf)
+        MPPT input cap     a_k*dl_k <= capA_k                         S5  (only if jp.mppt_cap_J is set)
+
+    c_i = jp.overhead (slave non-TX electronics energy per slot; zeros when no load is attached).
 
     Objective: th1*sum (tau/2) ln(1 + h*x/tau) + th2*sum (tau/2) ln(1 + hbar*xb/tau).
     Returns P = x/tau, Pbar = xb/tau, delta, and the optimal objective value.
@@ -935,13 +1170,18 @@ def reference_solution_joint(jp: JointParams):
     import cvxpy as cp
     m = jp.master
     N, tau, E, h, hb, a = m.N, m.tau, m.E, m.h, jp.h_bar, jp.a
+    cS, capA = jp.overhead, jp.capA
     x, dl, xb = cp.Variable(N, nonneg=True), cp.Variable(N, nonneg=True), cp.Variable(N, nonneg=True)
     cumE = np.cumsum(E)                                                 # cumulative harvest sum_{i<=k} E_i
     cum = lambda v: cp.cumsum(v)                                        # cumulative sum of a cvxpy vector
     cons = [cum(x + dl) <= cumE,                                        # master causality
             cum(x + dl)[-1] == cumE[-1],
-            jp.b0 + cum(cp.multiply(a, dl) - xb) >= jp.B_min,           # slave floor (end of slot)
-            jp.b0 + cum(cp.multiply(a, dl)) - cp.hstack([0, cum(xb)[:-1]]) <= jp.B_max]  # slave ceiling (arrival)
+            jp.b0 + cum(cp.multiply(a, dl) - xb - cS) >= jp.B_min,      # slave floor (end of slot)
+            jp.b0 + cum(cp.multiply(a, dl)) - cp.hstack([0, cum(xb + cS)[:-1]]) <= jp.B_max,  # slave ceiling (arrival)
+            jp.b0 + cum(cp.multiply(a, dl) - xb - cS)[-1] == jp.B_min]  # slave terminal: g[N] = 0
+    fin_cap = np.isfinite(capA)
+    if fin_cap.any():                                                   # S5: stored energy per slot <= capA
+        cons.append(cp.multiply(a, dl)[np.flatnonzero(fin_cap)] <= capA[fin_cap])
     if not jp.slave_schedule.all():                                     # S4: silent slots carry no slave data
         cons.append(xb[np.flatnonzero(~jp.slave_schedule)] == 0)
     if np.isfinite(m.E_max):                                            # master ceiling (arrival)
@@ -950,6 +1190,8 @@ def reference_solution_joint(jp: JointParams):
            + jp.theta2 * cp.sum(0.5 * tau * cp.log(1 + cp.multiply(hb, xb) / tau)))
     prob = cp.Problem(cp.Maximize(obj), cons)
     prob.solve(solver=cp.CLARABEL)
+    if x.value is None:                                                  # status infeasible / unbounded
+        raise InfeasibleSlaveBudget(f"reference problem is {prob.status}: S1-S5 with g[N] = 0 cannot be satisfied")
     return x.value / tau, xb.value / tau, dl.value, float(prob.value)
 
 
@@ -1423,33 +1665,159 @@ def plot_loss_histogram(jp: JointParams, r: JointResult, ph: PhysicalStorageResu
 
 
 # ----------------------------------------------------------------------------
-# Demo
+# Slave load panels (need the dict from slave_load.make_load(jp); the solver module itself never
+# imports the component model).  TX energy is the solver's slave data energy tau*Pbar_i.
 # ----------------------------------------------------------------------------
-if __name__ == "__main__":
-    # Run as a script:  python dwf_master_slave.py
-    # Test_harvest = np.array([0,12,0])
+C_MCU, C_MEM, C_MPPT = "#8a5cd6", "#c9a227", "#d6457a"
+LOAD_COLORS = {"camera": C_MASTER, "mcu": C_MCU, "flash": C_MEM, "mppt": C_MPPT, "tx": C_SLAVE}
+LOAD_LABELS = {"camera": "camera", "mcu": "MCU", "flash": "external memory", "mppt": "MPPT", "tx": "THz TX data energy, tau*Pbar_k (solver)"}
 
-    # Physical link parameters (given by the user)
-    SLAVE_SCHEDULE = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0]               # 1 = slave transmits, 0 = silent; repeats cyclically over the slots
+
+def slave_load_components(jp: JointParams, r: JointResult, load: dict) -> dict:
+    """Per-slot energies [J]: the four non-TX components from the profile, tx = tau*Pbar_i from the solver,
+    c = their non-TX sum and load = c + tx."""
+    comp = {k: np.asarray(load[k], float) for k in ("camera", "mcu", "flash", "mppt")}
+    comp["tx"] = jp.master.tau * r.Pbar
+    comp["c"] = np.asarray(load["c"], float)
+    comp["load"] = comp["c"] + comp["tx"]
+    return comp
+
+
+def plot_slave_load_per_slot(jp: JointParams, r: JointResult, load: dict, path: str, title: str = ""):
+    """Stacked per-slot slave energy: camera, MCU, memory, MPPT (profile) + TX data energy tau*Pbar (solver).
+    Silent slots are shaded; their electronics drain is tiny next to an ON slot, so it is hard to see."""
+    comp = slave_load_components(jp, r, load)
+    t = np.arange(jp.master.N)
+    fig, ax = _new_axis()
+    _shade_silent(ax, jp)
+    bottom = np.zeros(jp.master.N)
+    for k in ("camera", "mcu", "flash", "mppt", "tx"):
+        ax.bar(t, comp[k], bottom=bottom, color=LOAD_COLORS[k], width=0.8, label=LOAD_LABELS[k], zorder=2)
+        bottom += comp[k]
+    ax.set_ylabel("slave energy per slot [J]")
+    _legend(ax)
+    _finish(fig, ax, path, "Slave energy per slot by component", title, jp)
+
+
+def plot_slave_energy_breakdown(jp: JointParams, r: JointResult, load: dict, path: str, title: str = ""):
+    """Horizon energy of the slave by component with percentages (TX = solver data energy)."""
+    comp = slave_load_components(jp, r, load)
+    ks = ["camera", "mcu", "flash", "mppt", "tx"]
+    tot = {k: float(comp[k].sum()) for k in ks}
+    T = sum(tot.values()) or 1.0
+    fig, ax = _new_axis(figsize=(10.5, 4.2))
+    y = np.arange(len(ks))
+    ax.barh(y, [tot[k] for k in ks], color=[LOAD_COLORS[k] for k in ks], height=0.6, zorder=2)
+    for yi, k in zip(y, ks):
+        ax.annotate(f"  {tot[k]:.4g} J ({100 * tot[k] / T:.1f}%)", (tot[k], yi), va="center", fontsize=9, color=INK)
+    ax.set_yticks(y)
+    ax.set_yticklabels(["camera", "MCU", "external memory", "MPPT", "THz TX data (solver)"], color=INK2)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1.3 * max(tot.values()))
+    ax.set_xlabel("energy over all slots [J]")
+    ax.grid(False)
+    ax.grid(True, axis="x", color=GRID, lw=0.8)
+    _finish(fig, ax, path, "Slave energy over the horizon by component", title, None)
+    # (not a per-slot plot: _finish leaves the x label set above)
+
+
+def plot_slave_cumulative_energy(jp: JointParams, r: JointResult, load: dict, path: str, title: str = ""):
+    """Cumulative energy consumed by the slave (electronics c + TX data) against what was stored from the
+    energy link plus the initial excess.  The gap is the energy held above the floor, b_k - B_min."""
+    comp = slave_load_components(jp, r, load)
+    t = np.arange(jp.master.N)
+    consumed = np.cumsum(comp["load"])
+    stored = jp.g_init + np.cumsum(jp.a * r.delta)
+    fig, ax = _new_axis()
+    _shade_silent(ax, jp)
+    ax.plot(t, stored, color=INK2, lw=2, label="cumulative stored from the link + initial excess, (b0 - B_min) + sum a_i delta_i")
+    ax.plot(t, consumed, color=C_SLAVE, lw=2, label="cumulative consumed, sum (c_i + tau*Pbar_i)")
+    ax.plot(t, np.cumsum(comp["c"]), color=C_SLAVE, lw=1.2, ls="--", label="of which electronics only, sum c_i")
+    ax.fill_between(t, consumed, stored, color=C_SLAVE, alpha=0.12, lw=0, label="gap = energy held above the floor")
+    ax.set_ylabel("cumulative energy [J]")
+    ax.set_ylim(bottom=0)
+    _legend(ax)
+    _finish(fig, ax, path, "Slave cumulative energy: consumed vs stored", title, jp)
+
+
+def plot_slave_battery_window(jp: JointParams, r: JointResult, load: dict, path: str, title: str = ""):
+    """Usable slave energy above the floor, b - B_min, after each slot and right after each arrival, against
+    the window W = B_max - B_min and the profile's sizing lines (W_req, design window)."""
+    sz = load["sizing"]
+    t = np.arange(jp.master.N)
+    fig, ax = _new_axis()
+    _shade_silent(ax, jp)
+    ax.step(t, r.b - jp.B_min, where="mid", color=C_SLAVE, lw=2, label="end of slot k, b_k - B_min")
+    ax.step(t, r.b_peak - jp.B_min, where="mid", color=C_SLAVE, lw=1.2, ls="--", alpha=0.8,
+            label="right after arrival, b_(k-1) + a_k delta_k - B_min")
+    ax.axhline(jp.W, color=INK, lw=1.2, ls=":", label=f"window W = B_max - B_min = {jp.W:.4g} J")
+    ax.axhline(sz["W_req"], color=C_LINK, lw=1.2, ls="--", label=f"profile W_req = {sz['W_req']:.4g} J")
+    ax.axhline(sz["W_design"], color=C_MCU, lw=1.2, ls="--", label=f"profile W_design = {sz['W_design']:.4g} J")
+    ax.set_ylabel("usable slave energy above the floor [J]")
+    ax.set_ylim(bottom=0)
+    _legend(ax)
+    _finish(fig, ax, path, "Slave storage window", title, jp)
+
+
+def write_slave_energy_csv(path: str, jp: JointParams, r: JointResult, load: dict):
+    """slave_energy_profile.csv, same columns as slave_load.py writes: slot,on,camera_J,mcu_J,flash_J,mppt_J,
+    tx_J,load_J,stored_J,delta_sent_J,battery_end_J   (tx_J = tau*Pbar, load_J = c + tx_J, stored_J = a*delta,
+    delta_sent_J = delta, battery_end_J = b - B_min)."""
+    import csv
+    comp = slave_load_components(jp, r, load)
+    stored = jp.a * r.delta
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["slot", "on", "camera_J", "mcu_J", "flash_J", "mppt_J", "tx_J", "load_J",
+                    "stored_J", "delta_sent_J", "battery_end_J"])
+        for i in range(jp.master.N):
+            w.writerow([i, int(jp.slave_schedule[i]), *[f"{comp[k][i]:.6g}" for k in ("camera", "mcu", "flash", "mppt", "tx")],
+                        f"{comp['load'][i]:.6g}", f"{stored[i]:.6g}", f"{r.delta[i]:.6g}", f"{r.b[i] - jp.B_min:.6g}"])
+
+
+# ----------------------------------------------------------------------------
+# Demos.  DEMO selects one (or: python build_2D_dwf.py physical_demo)
+#   legacy_demo   : no slave load attached; reproduces the README numbers (objective 1902.8194, 1410 iters).
+#   physical_demo : dummy slave timing (slave_config.py), MPPT cap S5 on, window from size_storage.
+#                   The result is at DUMMY durations and placeholder h0 / theta2; it differs from legacy_demo
+#                   by orders of magnitude in slave data energy (the real electronics cannot absorb the
+#                   legacy stage-4 flows).  That is expected, not a solver bug: inputs are NOT retuned.
+# ----------------------------------------------------------------------------
+# DEMO = "legacy_demo"
+DEMO = "physical_demo"
+
+
+def _demo_problem() -> JointParams:
+    """The master + slave problem shared by both demos (winter harvest, tau = 60 s, THz link at 0.30 THz)."""
+    SLAVE_SCHEDULE = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0]               # 1 = slave transmits, 0 = silent; repeats cyclically over the slots
     LINK_DISTANCE_M = 0.0005             # master<->slave separation [m], shared by both links
     FREQ_THZ = 0.30                      # THz operating frequency chosen for the data link
     OPTICAL_ATTEN_450NM = 0.046         # Beer-Lambert c [1/m], 450 nm (blue) light in water
 
     # THz data link: symmetric, so the same gain is used for master->x and slave->master
-    h_thz = thz_gain(FREQ_THZ, LINK_DISTANCE_M)          # h0 = 1.0 (uncalibrated reference)
+    h_thz = thz_gain(FREQ_THZ, LINK_DISTANCE_M)          # h0 = thz_gain default (10.0): PLACEHOLDER, uncalibrated
 
     # 1) master: winter harvest array, unlimited master battery, 60 s slots, THz data link
     master = MasterParams(E=Harvested_energy_winter, E_max=np.inf, tau=60.0, h=h_thz)
     # 2) slave: alpha = Beer-Lambert transmittance of the 450 nm optical energy link,
     #    beta = 0.8, battery window [200, 5000] J, return data link = same THz channel
-    jp0 = JointParams(master=master, alpha=beer_lambert(OPTICAL_ATTEN_450NM, LINK_DISTANCE_M),
-                      beta=0.4, B_min=20.0, B_max=1500.0, h_bar=h_thz,
-                      slave_schedule=SLAVE_SCHEDULE)
+    return JointParams(master=master, alpha=beer_lambert(OPTICAL_ATTEN_450NM, LINK_DISTANCE_M),
+                       beta=0.4, B_min=20.0, B_max=2000.0, h_bar=h_thz,
+                       slave_schedule=SLAVE_SCHEDULE)
+
+
+def _run_demo(jp0: JointParams, outdir: str = ".", load: dict | None = None):
+    """Calibrate beta against the physical chain, solve, print the report and write the plots."""
+    import os
+    if outdir != ".":
+        os.makedirs(outdir, exist_ok=True)
+    out = lambda name: os.path.join(outdir, name)
+    master = jp0.master
 
     # Calibrate beta_i against the real photodiode+MPPT chain (Option B, Instructions.md), then
     # solve with it. joint_dwf() itself is unmodified; only jp.beta becomes per-slot and real.
     jp, r, ph, n_outer = solve_with_physical_chain(jp0, wavelength_nm=532, mppt_efficiency=0.95)
-    diagnose(jp, r)
+    diagnose(jp, r) if load is None else diagnose(jp, r, load=load)
     k = check_kkt_joint(jp, r)              # feasibility + delta-condition report
     print(f"iters={r.iters} converged={r.converged}")
     print(f"objective={r.objective:.4f}  master={r.rate_master:.4f}  slave={r.rate_slave:.4f}")
@@ -1465,17 +1833,58 @@ if __name__ == "__main__":
     print(f"stored energy  solver={r.stored_power.sum()*master.tau:.2f} J   "
           f"physical={ph.stored_energy_phys.sum():.2f} J")
     print(f"physical battery floor_violations={ph.floor_violations}  "
-          f"ceiling_violations={ph.ceiling_violations}  overflow_energy={ph.overflow_energy:.3e} J")
+          f"ceiling_violations={ph.ceiling_violations}  overflow_energy={ph.overflow_energy:.3e} J  "
+          f"overflow_mppt={ph.overflow_mppt_energy:.3e} J")
 
     caption = "Master + slave DWF (THz data link, 450 nm optical energy link)"
-    plot_link_power(jp, r, "plot_link_power.png", caption)
-    plot_transmit_power(jp, r, "plot_transmit_power.png", caption)
-    plot_slave_battery(jp, r, "plot_slave_battery.png", caption)
-    plot_throughput_per_slot(jp, r, "plot_throughput_per_slot.png", caption)
-    plot_throughput_cumulative(jp, r, "plot_throughput_cumulative.png", caption)
-    plot_harvested_energy(jp, r, "plot_harvested_energy.png", caption)
-    plot_sharing_energy(jp, r, "plot_sharing_energy.png", caption)
-    plot_cumulative_energy(jp, r, "plot_cumulative_energy.png", caption)
-    plot_physical_stored_power(jp, r, ph, "plot_physical_stored_power.png", caption)
-    plot_physical_slave_battery(jp, r, ph, "plot_physical_slave_battery.png", caption)
-    plot_loss_histogram(jp, r, ph, "plot_loss_histogram.png", caption)
+    plot_link_power(jp, r, out("plot_link_power.png"), caption)
+    plot_transmit_power(jp, r, out("plot_transmit_power.png"), caption)
+    plot_slave_battery(jp, r, out("plot_slave_battery.png"), caption)
+    plot_throughput_per_slot(jp, r, out("plot_throughput_per_slot.png"), caption)
+    plot_throughput_cumulative(jp, r, out("plot_throughput_cumulative.png"), caption)
+    plot_harvested_energy(jp, r, out("plot_harvested_energy.png"), caption)
+    plot_sharing_energy(jp, r, out("plot_sharing_energy.png"), caption)
+    plot_cumulative_energy(jp, r, out("plot_cumulative_energy.png"), caption)
+    plot_physical_stored_power(jp, r, ph, out("plot_physical_stored_power.png"), caption)
+    plot_physical_slave_battery(jp, r, ph, out("plot_physical_slave_battery.png"), caption)
+    plot_loss_histogram(jp, r, ph, out("plot_loss_histogram.png"), caption)
+    if load is not None:
+        cap2 = caption + "  [slave electronics attached; DUMMY timing]" if load.get("timing_is_dummy") else caption
+        plot_slave_load_per_slot(jp, r, load, out("plot_slave_load_per_slot.png"), cap2)
+        plot_slave_energy_breakdown(jp, r, load, out("plot_slave_energy_breakdown.png"), cap2)
+        plot_slave_cumulative_energy(jp, r, load, out("plot_slave_cumulative_energy.png"), cap2)
+        plot_slave_battery_window(jp, r, load, out("plot_slave_battery_window.png"), cap2)
+        write_slave_energy_csv(out("slave_energy_profile.csv"), jp, r, load)
+        print(f"wrote the 4 slave-load PNGs and slave_energy_profile.csv to {outdir}")
+    return jp, r, ph
+
+
+def legacy_demo():
+    """No slave load: reproduces the README stage-4 numbers."""
+    return _run_demo(_demo_problem())
+
+
+def physical_demo(outdir: str = "out_physical_demo"):
+    """Slave electronics at DUMMY timing (slave_config.py), S5 on, window from size_storage()."""
+    import slave_load
+    jp0 = _demo_problem()
+    jp_l = slave_load.attach_slave_load(jp0, size_storage=True)
+    load = slave_load.make_load(jp_l)
+    print(f"physical_demo: window W = {jp_l.W:.4g} J (size_storage), b0 - B_min = {jp_l.g_init:.4g} J, "
+          f"sum c = {jp_l.overhead.sum():.4g} J, MPPT cap = {jp_l.capA.min():.4g} J, eta_tx = {slave_load.cfg.ETA_TX:g}")
+    jp, r, ph = _run_demo(jp_l, outdir, load)
+    jl, rl, _, _ = solve_with_physical_chain(jp0, wavelength_nm=532, mppt_efficiency=0.95)
+    dur = "DUMMY durations" if slave_load.cfg.TIMING_IS_DUMMY else "measured durations"
+    print(f"physical_demo vs legacy_demo (same master; h0 and theta2 = {jp0.theta2:g} are placeholders; {dur}):")
+    print(f"  slave data energy {jp.master.tau * r.Pbar.sum():.4g} J vs {jl.master.tau * rl.Pbar.sum():.4g} J ; "
+          f"master -> slave sent {r.delta.sum():.4g} J vs {rl.delta.sum():.4g} J ; objective {r.objective:.1f} vs {rl.objective:.1f}")
+    return jp, r, ph
+
+
+if __name__ == "__main__":
+    import sys
+    # Run as a script:  python build_2D_dwf.py [legacy_demo | physical_demo]   (or edit DEMO above)
+    which = sys.argv[1] if len(sys.argv) > 1 else DEMO
+    if which not in ("legacy_demo", "physical_demo"):
+        raise SystemExit("usage: python build_2D_dwf.py [legacy_demo | physical_demo]")
+    {"legacy_demo": legacy_demo, "physical_demo": physical_demo}[which]()
