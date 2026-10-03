@@ -1380,8 +1380,13 @@ def plot_transmit_power(jp: JointParams, r: JointResult, path: str, title: str =
           "P̄_k = 0 in a transmit slot: level below floor", "x", INK)
     _mark(axs, t, nu_s, s_empty & jp.slave_schedule, "slave battery at floor B_min after a transmit slot (causality binds)", "v", C_SLAVE)
     _mark(axs, t, nu_s, s_full & jp.slave_schedule, "slave battery full on arrival, B_max (overflow binds)", "^", C_LINK)
-    axs.set_ylabel("slave power [W]")
-    axs.set_title("Slave: data power P̄_k vs water level", loc="left", color=INK2, fontsize=10)
+    # Slave powers can span many orders of magnitude (the floor 1/h̄ is huge next to P̄), so use a
+    # log axis; symlog keeps zero-power slots on the plot, linear below the smallest positive P̄.
+    pos = r.Pbar[r.Pbar > 1e-12]
+    linthresh = float(pos.min()) if pos.size else 1e-12
+    axs.set_yscale("symlog", linthresh=linthresh)
+    axs.set_ylabel("slave power [W] (log scale)")
+    axs.set_title("Slave: data power P̄_k vs water level (log scale)", loc="left", color=INK2, fontsize=10)
     axs.set_ylim(bottom=0)
     _legend(axs, "upper left")
     _finish(fig, (axm, axs), path, "Transmit power against the water-filling level", title, jp)
