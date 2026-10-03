@@ -5,6 +5,8 @@ project is, what the algorithm does, how it maps to the math, what has been veri
 is still open. Everything here reflects the state of the code as delivered; nothing is aspirational
 unless it is under "Open items".
 
+claude --resume c97f929b-cf69-483f-9bf1-54f542f3a0b6
+
 ---------------------------------------------------------------------------------------------
 
 ## 1. Project goal
@@ -28,7 +30,9 @@ Build, step by step, a **directional water-filling (DWF)** power/energy-sharing 
 The work has been done in stages: (1) master alone, (2) master + energy sharing `delta`, (3) master +
 slave with a finite battery window, (4) slave **transmission schedule** (the slave may only send data in
 some slots) and a **physical receive-chain calibration** of the down tap (photodiode/GaAs cell + MPPT).
-Stage 4 is the current state; `joint_dwf()` stays the single solver for all of it.
+(5) the slave's **electronics load**: camera, MCU, external memory and MPPT become a known per-slot energy drain
+`c_i` plus an MPPT input cap (S5), driven by one editable file, `slave_config.py` (section 4, "Slave electronics
+load"). Stage 5 is the current state; it is off by default and `joint_dwf()` stays the single solver for all of it.
 
 ---------------------------------------------------------------------------------------------
 
@@ -39,10 +43,14 @@ Stage 4 is the current state; `joint_dwf()` stays the single solver for all of i
 | `build_dwf.py` | Stage 1: master-only DWF. `MasterParams`, `directional_water_filling`, `check_kkt`, `reference_solution` (scipy), `plot_result`. Holds `Harvested_energy_summer` and `Harvested_energy_winter` (60 samples, J per 1-minute slot). |
 | `build_2D_dwf.py` | Stages 3-4: joint master + slave DWF, slave schedule (S4), physical-chain post-processing and calibration. Imports `Harvested_energy_summer`/`Harvested_energy_winter` and `MasterParams` from `build_dwf.py`, `diagnose` from `dwf_diagnostics.py`, and `optical_to_electrical`, `OpticalReceiveChainResult` from `physical_chain.py`. Fully commented (module docstring is a reading guide). |
 | `physical_chain.py` | Receive side of the optical energy link: optical power at the slave -> GaAs/Ge cell array (Spectrolab datasheet: Voc = 1.025 V, FF = 0.82, QE-derived responsivity at 450/532 nm) -> MPPT -> electrical power into the battery. `optical_to_electrical()`, `photodiode_stage()`, `mppt_stage()`, `size_array_by_intensity()`. Never modifies the solver. |
-| `dwf_diagnostics.py` | `diagnose(jp, r)`: human-readable report (sharing decision, energy ledger, active constraints, solver status). Called by the demo. |
+| `dwf_diagnostics.py` | `diagnose(jp, r, load=None)`: human-readable report (sharing decision, energy ledger, active constraints, solver status). With `load` (from `slave_load.make_load`) it also prints the dummy-timing banner, the electronics energy per component, the MPPT-cap status, the window check and the supercap sizing. Called by the demo. |
+| `slave_config.py` | **The only file to edit** for the slave electronics: real datasheet powers, DUMMY durations per slot type (scalars or length-N arrays, `None` = rest of the slot), `TIMING_IS_DUMMY`, `ETA_TX`, `STORAGE_MARGIN`. Pure data. |
+| `slave_load.py` | (called `slave_load_profile.py` in the task text) Component model of the slave: `load_timing()` (validated `SlotTiming`), `overhead_profile()` (per-component energies and `c = camera + mcu + memory + mppt`, no TX), `attach_slave_load(jp, ...)`, `make_load(jp)`, `size_storage()`, `derive_dummy_timing()`, and the standalone illustration (`python slave_load.py`). Imported lazily by the demo; the solver module never imports it. |
+| `Instructions_slave_load_integration.md` | The spec this stage was built from (section 4, "Slave electronics load", records where the code differed from it). |
 | `Instructions.md` | Design notes for replacing the linear slave-battery model with the physical chain: Option B (per-slot calibrated `beta`, **implemented**) and Option C (nonlinear tap inside the optimiser, **not implemented**). |
 | `PD cell/` | Datasheets (photodiodes, APD, STM32L010, ODD-5W) used for the receive-chain parameters. |
 | `plot_link_power.png`, `plot_transmit_power.png`, `plot_slave_battery.png`, `plot_throughput_per_slot.png`, `plot_throughput_cumulative.png`, `plot_harvested_energy.png`, `plot_sharing_energy.png`, `plot_physical_stored_power.png`, `plot_physical_slave_battery.png` | Output of the demo: one PNG per panel (see section 4's "Public API" for what each shows). Each function saves exactly one figure, so panels can be read, sized and shared independently. |
+| `out_physical_demo/` | Output of `python build_2D_dwf.py physical_demo`: all the plots above plus `plot_slave_load_per_slot.png`, `plot_slave_energy_breakdown.png`, `plot_slave_cumulative_energy.png`, `plot_slave_battery_window.png` and `slave_energy_profile.csv` (columns `slot,on,camera_J,mcu_J,flash_J,mppt_J,tx_J,load_J,stored_J,delta_sent_J,battery_end_J`; `tx_J = tau*Pbar`, `load_J = c + tx_J`, `stored_J = a*delta`, `battery_end_J = b - B_min`). Kept in its own folder so the legacy plots are not overwritten. `python slave_load.py` writes the same file names into the current folder from its standalone illustration. |
 | `dwf_master_inf.png`, `dwf_master_3300.png` | Stage 1 plots (E_max = inf and 3300 J). |
 | Reference papers (PDF, provided by the user) | Gurakan et al., *Energy Cooperation in Energy Harvesting Communications* (2-D DWF, right/down taps); Ozel et al., *Transmission with Energy Harvesting Nodes in Fading Wireless Channels* (and the INFOCOM'11 version); Ozel et al., *Optimal Broadcast Scheduling ... Finite Capacity Battery*; *Sum-rate optimal power policies ... interference channel*. |
 
@@ -50,9 +58,10 @@ Stage 4 is the current state; `joint_dwf()` stays the single solver for all of i
 
 Dependencies: `numpy`, `matplotlib` (plots), plus the local modules above. `cvxpy` (with the CLARABEL solver) only for
 `reference_solution_joint()`, which is a cross-check, not part of the algorithm.
-`scipy` is used by the stage-1 `reference_solution()`.
+`scipy` is used by the stage-1 `reference_solution()` and, only when a slave load is attached and the just-in-time
+start breaks a bound, by the LP start fallback (`scipy.optimize.linprog`).
 
-Run the demo: `cd advanced_DWF && python build_2D_dwf.py` (prints the `diagnose()` report, the KKT and calibration summaries, and writes the nine `plot_*.png` files above).
+Run the demo: `cd advanced_DWF && python build_2D_dwf.py` (= `legacy_demo`: prints the `diagnose()` report, the KKT and calibration summaries, and writes the nine `plot_*.png` files above). `python build_2D_dwf.py physical_demo` runs the same problem with the slave electronics attached (see section 7); the choice is also the `DEMO` constant in `build_2D_dwf.py`.
 
 ---------------------------------------------------------------------------------------------
 
@@ -77,9 +86,12 @@ The data energies are *defined* by the energy balance:
 
 ```
 tau*P_i    = E_i + F_{i-1} - F_i - delta_i            (master)
-tau*Pbar_i = a_i*delta_i + Gt_{i-1} - Gt_i            (slave)
+tau*Pbar_i = a_i*delta_i + Gt_{i-1} - Gt_i - c_i      (slave; c_i = 0 without a slave load)
 F_{-1} = F_{N-1} = 0 ;  Gt_{-1} = b0 - B_min ,  Gt_{N-1} = 0
 ```
+
+`c_i >= 0` [J] is the non-TX electronics energy the slave burns in slot i (camera + MCU + memory + MPPT), see
+"Slave electronics load" in section 4. The THz transmit stage is not in `c_i`: its energy is the data energy `tau*Pbar_i`.
 
 `Gt_k = b_k - B_min`, where `b_k` is the slave battery level at the end of slot k.
 
@@ -93,14 +105,22 @@ S1  b_n >= B_min                           slave floor, end of slot    [lambda_b
 S2  b_{n-1} + a_n*delta_n <= B_max         slave ceiling, at ARRIVAL   [mu_bar_{n-1}]
 S3  Pbar_i >= 0                                                        [eta_bar_i]
 S4  Pbar_i = 0 in every slot with schedule s_i = 0     (JointParams.slave_schedule)
+S5  a_k*delta_k <= capA_k                  MPPT input rating, stored energy per slot (JointParams.mppt_cap_J; inf = off)
 ```
 
 **S4 (slave schedule).** `s_i in {0,1}`; a shorter pattern repeats cyclically (`[1,0]` = every other
 slot). A silent slot (`s_i = 0`) still *receives* `delta_i` and stores it; it is a pure pass-through for
 the slave battery (carry in = carry out + arrival). Consequence: energy sent in a silent slot has no local
 marginal value; it is valued at the next transmitting slot, so the interior condition `m_k = a_k s_k` is
-only tested at transmitting slots. The initial excess `b0 - B_min` can only be spent from the first ON
-slot on. Validation: the schedule must be 0/1, and `b0 > B_min` with no ON slot is rejected.
+only tested at transmitting slots. The initial excess `b0 - B_min` can only be spent as data from the first ON
+slot on. **With a slave load attached, silent slots also drain `c_i`**, so the excess is no longer "carried
+unchanged" to the first ON slot: it falls through the leading silent run (`Gt_i = Gt_{i-1} + a_i*delta_i - c_i`).
+Validation: the schedule must be 0/1, and `b0 > B_min` with no ON slot is rejected.
+
+**S5 (MPPT input rating).** `a_k*delta_k <= capA_k`, `capA_k = mppt_in_V*mppt_in_I_max*mppt_eff*tau` (18.81 J at the
+defaults). `a_k` already contains the efficiency, so this bounds the stored energy. It is one more linear bound on
+`d[k]`, added through `apply()` and to the explicit bounds of moves 1-5; with `capA = inf` nothing changes. Within a
+slot the arrival happens first and the drain after it (ceiling checked at arrival, floor at the end of the slot).
 
 S1 and S2 combine into one two-sided bound on the slave carry:
 `B_min <= b_n <= B_max - a_{n+1}*delta_{n+1}`. The slave's right-tap capacity therefore depends on a
@@ -167,15 +187,26 @@ Network picture (each arrow is a flow variable):
 | `d[k]` | `delta_k` |
 | `W` | `B_max - B_min` |
 | `xm(i)` | `tau*P_i = E[i] + f[i] - f[i+1] - d[i]` |
-| `xs(i)` | `tau*Pbar_i = a[i]*d[i] + g[i] - g[i+1]` |
+| `cS[i]` | `c_i` slave electronics energy (`jp.overhead`; zeros without a load) |
+| `capA[k]` | MPPT stored-energy cap (`jp.capA`; inf without a cap) |
+| `xs(i)` | `tau*Pbar_i = a[i]*d[i] + g[i] - g[i+1] - cS[i]` |
 
 Because the flows are the variables, the energy-balance equalities hold by construction and the
 constraints become bounds: `f >= 0`, `f[k+1] <= capM[k]`, `g >= 0`, `d >= 0`,
-`g[k] + a[k]*d[k] <= W` (slave arrival cap), `xm >= 0`, `xs >= 0`.
+`g[k] + a[k]*d[k] <= W` (slave arrival cap), `a[k]*d[k] <= capA[k]` (S5), `xm >= 0`, `xs >= 0`.
 
 ### Start point
 `f = 0`, `g = 0` (except `g[0]`), `d = 0`: "spend what you harvest, share nothing". If the first slots are
 silent (S4), the initial slave excess `g[0]` is carried unchanged up to the first ON slot so the start is feasible.
+This is the path with no slave load (bit-identical to the original solver).
+
+With a load (`c > 0`) "share nothing" is infeasible (`g[N] = 0` is fixed), so the start is **just-in-time**:
+`f = 0`, `xs = 0`, `d[k] = max(0, c_k - g[k])/a[k]`, `g[k+1] = g[k] + a_k d_k - c_k`; any initial excess beyond the
+total drain is spent as data in the first ON slot. If that start breaks a bound (`d[k] > E[k]` with `f = 0`,
+`g[k] + a_k d_k > W`, `a_k d_k > capA_k`, or `a_k = 0` with a shortfall) a feasibility LP with the constraints of
+`reference_solution_joint` is tried (it may borrow through `f`); if that is infeasible too, `InfeasibleSlaveBudget`
+is raised naming the slots and the binding quantity. No constraint is ever relaxed. `JointResult.start` reports
+`share-nothing`, `just-in-time` or `lp-fallback`.
 
 ### The one equation: `step()`
 
@@ -232,7 +263,13 @@ slot skips them.
   the flows, so each affected quantity is `v + c*t` and must stay in `[L, U]`; the tightest bounds
   form `[lo, hi]`; the move is `clip(t_star, lo, hi)`.
 * `polish()` extends the pass-through idea to **runs of consecutive dead slots** (paths across two or
-  more dead slots): master chains, slave chains, and cross paths master -> down tap -> slave.
+  more dead slots): master chains, slave chains, and cross paths master -> down tap -> slave. When a slave load is
+  attached it adds **family D, the cross-run delta shift**: `d[k] += t`, `g[k+1..j] += a_k t`, `d[j] -= (a_k/a_j) t`
+  for any `k < j` (every `xs(q)` unchanged, equation `nu_k = (a_k/a_j)-weighted nu_j`, the same `step()` as move 10, all
+  bounds via `apply()`, incl. S5). Move 10 only shifts between adjacent slots and a master slot with a high water
+  level in between blocks the chain, although the end-to-end shift pays; with a load the silent runs route energy
+  through exactly such slots. The joint_dwf argument `cross_run` (default: on iff a load is attached) switches it, so
+  the no-load path stays bit-identical.
   A slot is "dead" if its data energy `<= 1e-6*scale`. It is only called when the fast sweeps have
   stopped moving. Under S4 the slave chain is attempted only if both end slots transmit, and silent slots are
   excluded as slave sinks of the cross paths (they may still be crossed).
@@ -252,9 +289,12 @@ slot skips them.
 ### Public API of `build_2D_dwf.py`
 `beer_lambert(c, d)`, `thz_absorption(freq_thz)`, `thz_gain(freq_thz, d, h0)`, `JointParams`
 (now with `slave_schedule` and per-slot `beta`), `JointResult`, `PhysicalStorageResult`,
-`joint_dwf(jp, tol, max_iter)`, `physical_stored_power(jp, r, ...)`, `solve_with_physical_chain(jp, ...)`,
-`check_kkt_joint(jp, r)`, `reference_solution_joint(jp)` (cvxpy), and one plotting function per panel (each saves a single
-PNG to `path`; `title` is an optional figure-level caption):
+`joint_dwf(jp, tol, max_iter, cross_run)`, `InfeasibleSlaveBudget`, `physical_stored_power(jp, r, ...)`,
+`solve_with_physical_chain(jp, ...)`, `check_kkt_joint(jp, r)`, `reference_solution_joint(jp)` (cvxpy), the demos
+`legacy_demo()` / `physical_demo()`, and one plotting function per panel (each saves a single
+PNG to `path`; `title` is an optional figure-level caption). The four slave-load panels
+(`plot_slave_load_per_slot`, `plot_slave_energy_breakdown`, `plot_slave_cumulative_energy`, `plot_slave_battery_window`,
+all `(jp, r, load, path, title)`) and `write_slave_energy_csv(path, jp, r, load)` take the dict from `slave_load.make_load(jp)`:
 
 | Function | Panel |
 |---|---|
@@ -270,7 +310,11 @@ PNG to `path`; `title` is an optional figure-level caption):
 
 `plot_transmit_power` and `plot_throughput_per_slot` shade the silent slots (`_shade_silent`).
 `check_kkt_joint` now also returns `slave_silent_slots` and `max_Pbar_in_silent_slots` (S4, should be ~0), and
-tests the `delta` condition only at transmitting slots. `reference_solution_joint` adds `xb[silent] == 0`.
+tests the `delta` condition only at transmitting slots, and, with a load, `slave_overhead_total_J`,
+`max_cap_violation_J` (S5, ~0), `mppt_cap_active_slots` (the `delta` condition is skipped where S5 binds),
+`min_slave_level_margin_J` (>= 0) and `slave_ledger_error_J` (`(b0-B_min) + sum a delta - sum c - sum tau Pbar -
+(b_{N-1}-B_min)`, ~1e-12). `reference_solution_joint` adds `xb[silent] == 0`, the drain `c`, the S5 bound and the same
+terminal condition as the solver (`g[N] = 0`); it raises `InfeasibleSlaveBudget` when cvxpy reports infeasible.
 `plot_harvested_energy` and `plot_sharing_energy` used to be one combined plot (`plot_energy_balance`),
 but `E_i` is normally one to three orders of magnitude larger than the sharing quantities, which
 flattened the sharing curves to the baseline; they are now separate figures with independent scales.
@@ -283,7 +327,10 @@ its own figure (a shared `_new_axis()`/`_finish()` helper pair keeps the styling
 and its efficiency differs from the placeholder `beta`. Two functions bridge this without touching the solver
 (Option B of `Instructions.md`):
 
-* `physical_stored_power(jp, r, wavelength_nm=532, mppt_efficiency=0.95, ...)`: feeds `r.arrived_power`
+* `physical_stored_power(jp, r, wavelength_nm=532, mppt_efficiency=0.95, ...)`: (with a load it also subtracts `c_i` from the
+  re-simulated battery and clips the stored energy to the MPPT cap, `overflow_mppt`; `physical_chain.py` does not
+  saturate at the MPPT rating and is not edited. `eff_phys` stays the unclipped chain gain so calibration is stable.)
+  Feeds `r.arrived_power`
   (`alpha*delta/tau`) through `optical_to_electrical()` and returns a `PhysicalStorageResult`: MPPT output
   power/energy, `eff_phys = P_mppt / P_arrived` (NaN where nothing arrives), the slave battery re-simulated
   with the physical arrivals (`b_phys`, `b_peak_phys`), `overflow` above `B_max`, and floor/ceiling violation
@@ -301,6 +348,63 @@ Option C (nonlinear tap inside the optimiser) is described in `Instructions.md` 
 a channel gain via `h = h0 * exp(-alpha_m*d)`, the same shape as `beer_lambert`'s transmittance but
 with a free reference constant `h0` (default now 10.0) standing in for whatever the absorption coefficient
 alone does not capture.
+
+### Slave electronics load (stage 5)
+
+Everything here is **off by default**: without a load the solver reproduces the stage-4 numbers bit for bit.
+
+```python
+import slave_load
+jp_l = slave_load.attach_slave_load(jp, size_storage=True)   # copy of jp + c_i, MPPT cap, eta_tx, window
+load = slave_load.make_load(jp_l)                            # components, c, sizing: for plots / CSV / diagnose
+jp_l, r, ph, n = solve_with_physical_chain(jp_l)             # or joint_dwf(jp_l)
+diagnose(jp_l, r, load=load)
+```
+
+* **What is `c_i`.** `slave_load.overhead_profile()` returns camera, MCU, memory (key `flash`, kept for CSV/plot
+  compatibility) and MPPT energy per slot, `E = P_active*t_active + P_sleep*t_sleep` (memory:
+  `P_active*(t_write + t_read) + P_retain*t_retain`), and `c` = their sum. No TX. The schedule is read from
+  `jp.slave_schedule`; ON-slot durations apply where `s_i = 1`, SILENT-slot durations where `s_i = 0`.
+  The MPPT quiescent/sleep choice follows the **schedule**, not `delta_i > 0` (about 30 uJ per slot, and a solver-dependent
+  `c_i` would be circular).
+* **Editing.** Only `slave_config.py`. Durations are scalars or length-N arrays; `None` for a sleep/retain time means
+  the rest of the slot; if an explicit sleep leaves a component's times short of `tau` the remainder is treated as powered
+  off (0 W) and one line says so. Validation raises `ValueError` naming the field and slot (negative duration, active +
+  sleep > `tau`, memory write + read + retain > `tau`, per-slot array of the wrong length, TX window longer than
+  `mcu_active_s`, `None` where a time is required). While `TIMING_IS_DUMMY = True` every run prints
+  `slave timing: DUMMY values (edit slave_config.py)` (also at the top of `diagnose(load=...)`); flipping the flag removes
+  only that banner. Swapping every duration for another value (including per-slot arrays) needs no code edit and changes
+  only numbers (tested: same output files, same CSV header, same printed structure).
+* **Dummy defaults** reproduce the standalone baseline: silent slot 13.646 mJ, ON-slot non-TX 0.7527 J (camera 0.1506,
+  MCU 0.2709, memory 0.3312, MPPT 5.8e-5), `sum(c) = 15.601 J` over the 60-slot demo schedule.
+* **`attach_slave_load`** validates `slave_config.TAU_S == jp.master.tau` and the schedule length, scales `h_bar` by
+  `eta_tx` (radiated = `eta_tx*Pbar`; `Pbar` stays the electrical TX power), sets `mppt_cap_J` (or `None` with
+  `use_mppt_cap=False`) and, with `size_storage=True`, `B_max = B_min + W_std` and `b0 - B_min` = drain of the leading
+  silent run. It is not idempotent (attaching twice scales `h_bar` twice). The sizing uses the **placeholder TX energy**
+  (0.5 W x 2 s, DUMMY), because the true TX energy is the solver's output; the solver then spends the whole window it is
+  given (about 4.5 J of TX per ON slot in `physical_demo` against the 1 J placeholder), so `W_req` is a lower bound, not what
+  the solution uses.
+
+Decisions taken where the spec left a question open (defaults stated in the spec; change them in `slave_config.py`):
+
+| Question | Default used |
+|---|---|
+| TX window convention | **Short burst**: `tx_window_s` = 2 s (DUMMY) inside the read window. The DWF credits `tau/2 ln(1 + hbar*Pbar)` with `Pbar` averaged over the whole slot, so a real burst radiating `xs/t_tx` delivers fewer nats (concavity). The solver is not changed; `attach_slave_load` warns when the TX window is shorter than `tau`. |
+| `eta_tx` (THz source efficiency) | 1.0 (DUMMY); folded into `h_bar`. |
+| Initial slave charge `b0` | Legacy: `B_min` (unchanged). `size_storage=True`: `b0 - B_min` = leading silent-run drain (0.1774 J at the defaults). |
+| Captures in silent slots | None (`SILENT_SLOT.camera_active_s = 0`); a per-slot array puts them in. Holding an image in memory across slots is not modelled. |
+| Supercap leakage | Not modelled (at a few uA it competes with the 227 uW sleep floor). |
+| `B_min` | Kept from `jp` (20 J in the demo); `size_storage` only sets the window `W`. |
+
+Where the spec / task text differed from the code: the task text calls the module `slave_load_profile.py` (file is
+`slave_load.py`); `solve_with_physical_chain` and `PhysicalStorageResult.overflow` already existed (only `c_i` and the MPPT
+cap were added); `physical_chain.py` is the constant-Voc GaAs/Ge model (no log/dark-current Voc as `Instructions.md` describes) and
+does not saturate at the MPPT rating, so the clip lives in `physical_stored_power`; the spec's start-point fallback names
+cvxpy, but the rule "no cvxpy in the algorithm path" is kept by using `scipy.optimize.linprog`; `tx_window_s` was added
+to the config (needed for the TX-window warning and the standalone placeholder); the demo comment saying `h0 = 1` was stale
+(`thz_gain` defaults to `h0 = 10`); "W below the largest silent drain" does **not** make the problem infeasible, because
+silent slots can still receive `delta` and the master can feed the slave just in time (checked against cvxpy): only
+`W < c_k` for a single slot does.
 
 ---------------------------------------------------------------------------------------------
 
@@ -330,7 +434,12 @@ The demo uses these; replace them when real values exist.
 | `theta1`, `theta2` | 1 and **3** (default changed; slave rate weighted 3x) | assumption (weighted sum-rate) |
 | `slave_schedule` | 30-slot pattern (13 silent, 4 ON, 4 silent, 3 ON, 1 silent, 3 ON, 2 silent) repeated over 60 slots: 20 ON, 40 silent | assumption / test pattern (slave transmits in 1/3 of the slots) |
 | `E_max` (master) | inf | assumption (user said it can go to infinity) |
-| `b0` (initial slave charge) | `B_min` | ASSUMPTION, asked, not yet answered |
+| `b0` (initial slave charge) | `B_min` (legacy); lead-run drain with `size_storage=True` | ASSUMPTION, asked, not yet answered |
+| Slave durations (`ON_SLOT`, `SILENT_SLOT` in `slave_config.py`): capture 0.5 s, MCU awake 4.5 s, memory write/read 2 s each, MPPT quiescent whole slot, TX window 2 s | dummies | **DUMMY** (marked in the file; `TIMING_IS_DUMMY`) |
+| Image 2 MB, memory 1 MB/s, link 10 Mbit/s, TX stage 0.5 W (`STANDALONE`) | dummies | **DUMMY**, standalone illustration / `derive_dummy_timing` only, never on the solver path |
+| `ETA_TX` | 1.0 | **DUMMY** |
+| `STORAGE_MARGIN` | 2.0 | **DUMMY** (design window = margin x `W_req`) |
+| Datasheet powers (camera 0.30/10 uW, MCU 60 mW/16 uW, memory 80 mW/0.2 mW, MPPT 0.96/1.44 uW, input 3.3 V x 100 mA, eff 0.95, 2.2-5.2 V) | stated powers (not V x I) | real (`datasheet_check()` reports the V x I mismatches) |
 | Receive chain | GaAs/Ge cell (Spectrolab datasheet), FF 0.82, Voc 1.025 V constant, array sized by intensity | datasheet numbers; Voc fall-off at low illumination is NOT modelled (see `physical_chain.py` docstring) |
 | Arrival timing | energy sent in slot k is usable by the slave in slot k | ASSUMPTION (as in Gurakan; acoustic/optical delay negligible vs 60 s) |
 
@@ -352,6 +461,18 @@ the 40 silent slots, about 7e-16 per `check_kkt_joint`), shared 21.65 W mean = *
 `check_kkt_joint`: final master carry 0, slave end level 20 J, `delta`-condition violations 0.
 Calibration: 4 outer iterations, `beta` in [0.3798, 0.4000], max |solver battery - physical battery| =
 3.9e-12 J, stored energy solver = physical = 29600 J, no floor/ceiling violations, overflow 0.
+
+### `physical_demo` (slave electronics attached, DUMMY durations)
+
+Same master (winter harvest, `tau = 60`, `h`), same schedule, same placeholder `h0` and `theta2`, but
+`attach_slave_load(jp, size_storage=True)`: window `W = 5.217 J` (0.47 F supercap over 2.2-5.2 V), `b0 - B_min = 0.1774 J`,
+`sum(c) = 15.6007 J`, MPPT cap 18.81 J. Result: objective **1538.8069**, 1650 iterations, converged; master 1535.9518, slave
+0.9517 nats; slave data energy **89.3 J** (against 29,600 J in `legacy_demo`), master -> slave **275.7 J** (against 77,945 J),
+stored 104.7 J, calibration in 4 outer iterations (`beta = 0.3798`), solver and physical batteries agree to 5e-14 J, no floor,
+ceiling or MPPT overflow, slave ledger error 1e-14 J, every ON slot ends at the window. The huge difference to `legacy_demo`
+is expected: the legacy stage-4 flows (29.6 kJ of slave data, 24.7 W of stored power) are far outside what the real electronics
+and the MPPT can absorb. It is the point of the exercise, not a solver bug; `h0`, `theta2` and the harvest were **not** retuned,
+and the numbers are at DUMMY durations and placeholder `h0`/`theta2`.
 
 **The slave battery trajectory is not unique.** `(P, Pbar)` are unique (strict concavity), but the
 split of carried energy between the master battery and the slave battery is not when both have slack
@@ -383,6 +504,29 @@ tie-breaker is added.
 * **Gurakan Sec. VIII-A relay example 1** as printed in the provided PDF is inconsistent (cumulative
   `P + delta` exceeds cumulative `E`); example 2 is consistent but is a relay-throughput problem with
   data causality, which this code does not model. Do not use example 1 as ground truth.
+* **Slave load (stage 5)**, checked against `reference_solution_joint` (extended first, with `c`, S5 and the terminal
+  condition; with `c = 0`, `cap = None` it matches the old reference to 4e-11 relative on the default, no-sharing and tight cases):
+  * *Equivalence*: `c = 0`/`cap = None` and `c = zeros` vs the ORIGINAL solver on 250 random cases (25 per family): 250/250
+    bit-identical (arrays, `iters`, objective); `legacy_demo` reproduces 1902.8194 / 1410 and every legacy PNG byte for byte.
+  * *Random cross-check*, 25 cases per family (N = 8-14, random `h`, `hbar`, `alpha`, `E`, `c`, weights, windows, caps; no case
+    infeasible, none non-converged, none above the reference): random per-slot `c` 23 exact / 2 below (max 5.5e-4 relative),
+    scalar `c` 24/1 (1.2e-4), all ON 25/0, one ON slot 21/4 (2.2e-3), leading/trailing silent runs 25/0, `[1,0]` 22/3 (1.1e-2),
+    tight `W` 19 exact + 1 within 1e-6 / 5 below (3.3e-4), per-slot `beta` 21/4 (9.6e-3), finite `E_max` 25/0, S5 binding 25/0 (S5
+    binds in all 25). Total: **230 exact, 1 within 1e-6, 19 below the optimum (7.6%), 0 above**.
+  * *Gap rate before and after the cross-run move* (family D): 81/250 below (32%, 167 exact, max 1.1%) with `cross_run=False`, 19/250 after (230 exact). The same
+    generator with `c = 0` shows the old solver already stalls on it (50/250 below; 18/250 with `cross_run=True`, same worst
+    case 1.1%), so the remaining gaps are mostly the pre-existing corner-stalling of section 9, not the load. They need
+    random per-slot `h`/`alpha`/`beta` and tight windows; **realistic inputs** (winter and summer harvest, `h` constant,
+    run-structured schedules of 60 slots, dummy-timing `c`, S5 on, with and without `size_storage`): 20/20 exact.
+    A generalisation of family D that takes the master end node through dead master slots was tried and dropped: it did not
+    finish the random matrix in 10 minutes (it multiplies the `apply()` calls of every polish).
+  * *Invariants* (random cases with generous `W`): objective non-increasing in `c` (scale 0, 1, 2, 5), non-decreasing in `W` and in the cap: 39/39 each for cvxpy and for the solver (1 of 40 cases skipped as infeasible at 5x `c`); scaling `E, B, c, cap` by `s` and `h, hbar` by `1/s` scales `P, Pbar` by `s`: 38/39 within 1e-5 (the other 1.2e-4, a solver that stalls at a slightly different point); energy accounting on both nodes closes to 3.9e-12 J (39/39 under 1e-8); `Pbar = 0` in silent slots 39/39; `0 <= Gt` and arrival `<= W`, S5 respected 39/39.
+  * *Infeasible inputs* raise `InfeasibleSlaveBudget` with slot and quantity: `W` below a single slot's drain, `c_k` above
+    `capA`, `a_k = 0` with `c_k > 0`, zero harvest when sharing is needed. `W` below the longest silent-run drain is feasible
+    (silent slots can be fed) and solver and cvxpy agree on it (145.0069 nats).
+  * *Dummy-to-real swap*: every duration in `slave_config.py` changed (including per-slot arrays for the camera and the silent
+    slots) and `TIMING_IS_DUMMY = False`, `python build_2D_dwf.py physical_demo` re-run with no code edit: same files, same CSV
+    header, same printed structure, only numbers (and the banner) differ.
 * **Schedule (S4):** the demo's `max_Pbar_in_silent_slots` is about 7e-16 and the `delta` condition holds at
   every transmitting slot. `reference_solution_joint` includes the S4 constraint, but a systematic cvxpy
   comparison over random schedules (and for move 10) has NOT been run yet.
@@ -400,6 +544,14 @@ tie-breaker is added.
   than `check_kkt_joint` (which only tests feasibility and the `delta` condition).
 * **Speed:** pure-Python loops. About 10 s for N = 60 with `E_max = inf` (slow diffusion of energy along
   the master chain). Larger N or tighter `tol` will be slower; vectorising the sweep would be the fix.
+* **Slave load limits.** (1) *Averaging convention*: the DWF credits the slave rate with `Pbar` averaged over the whole slot;
+  a TX burst shorter than `tau` delivers fewer nats (warned at attach time, solver unchanged). (2) *Ceiling-then-drain*:
+  the arrival is assumed to come first and the drain after it (ceiling at arrival, floor at end of slot), conservative for the
+  ceiling. (3) *Silent-run coupling*: energy is routed through silent slots that now drain; the plain moves can stall there, the
+  cross-run delta shift removes most of it (section 8) but not all on extreme random inputs. (4) The result depends on DUMMY
+  durations and on `h0`/`theta2`; do not read `physical_demo` numbers as results about the real system. (5) `size_storage`
+  uses the placeholder TX energy, so its window is a lower bound for what the solver then uses. (6) Supercap leakage and
+  images held across slots are not modelled. (7) The LP start fallback uses scipy and a slightly looser feasibility tolerance (1e-9).
 * **No multipliers are returned.** They can be recovered from the water levels (`Lambda = th/(2 nu)`),
   but only for slots with positive power.
 * **Slave has no harvest input** (`Ebar`); the published examples all have one. Adding it is small:
@@ -407,7 +559,7 @@ tie-breaker is added.
   (`apply`, moves 1-5, 7, 9, `check_kkt_joint`, `reference_solution_joint`, `b_peak`).
 * `check_kkt_joint(..., tol)`: `tol` is unused.
 * `dwf_diagnostics.diagnose()` assumed a scalar `jp.beta` in a couple of print lines (noted in
-  `Instructions.md`); beta is now per-slot after calibration, so check its output if it looks off.
+  `Instructions.md`); that line now uses the array summary (`_rng`) and the mean for the dB figure.
 * `solve_with_physical_chain` calibrates only slots where `delta` moves energy; other slots keep the initial
   `beta`, which is harmless because they carry no energy. Whether the secant gain is a good tap model at other
   operating points is untested (that is Option C's job).
@@ -475,6 +627,12 @@ assert r.converged and abs(ref - r.objective) < 1e-5 * abs(ref)
     slot, leading/trailing silent runs, per-slot `beta`), reporting failure rates as in section 10.
 12. Implement Option C of `Instructions.md` (nonlinear photodiode/MPPT tap inside the optimiser) if the
     secant-gain calibration proves inadequate; add Voc fall-off at low illumination to `physical_chain.py`.
+14. Replace the DUMMY durations in `slave_config.py` with measured values (set `TIMING_IS_DUMMY = False`), and the TX stage
+    (`ETA_TX`, TX window, image size, memory/link rates) with the real hardware; decide whether captures move into silent
+    slots and model the memory holding an image across slots.
+15. If the remaining random gaps matter, extend the cross-run move (master end node through dead master slots) in a form that
+    does not blow up the polish cost; report the gap rate before and after as in section 10.
+16. Slave supercap leakage, and a rerun of `physical_demo` with the real `h0`/`theta2`.
 13. The schedule is a fixed input. Choosing which slots the slave transmits in would be a combinatorial
     extension and is not attempted.
 
