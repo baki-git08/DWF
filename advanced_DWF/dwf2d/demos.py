@@ -48,7 +48,7 @@ def _demo_problem() -> JointParams:
     # 2) slave: alpha = Beer-Lambert transmittance of the 450 nm optical energy link,
     #    beta = 0.8, battery window [200, 5000] J, return data link = same THz channel
     return JointParams(master=master, alpha=beer_lambert(OPTICAL_ATTEN_450NM, LINK_DISTANCE_M),
-                       beta=0.4, B_min=20.0, B_max=2000.0, h_bar=h_thz,
+                       beta=0.9, B_min=200.0, B_max=1500.0, h_bar=h_thz,
                        slave_schedule=SLAVE_SCHEDULE)
 
 
