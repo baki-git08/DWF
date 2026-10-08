@@ -393,3 +393,129 @@ def diagnose(jp, r, tol: float = 1e-6, verbose: bool = True, meta: dict | None =
     print(f"  objective {r.objective:.6g} nats = th1*{r.rate_master:.4g} + th2*{r.rate_slave:.4g} | shared fraction of harvest {100 * share:.1f}%"
           f" | iters {r.iters} | converged {r.converged}")
     return out
+
+
+# ----------------------------------------------------------------------------------------------
+# Stage 6: the master has no data link (theta1 = 0); the slave sends THz bursts in events
+# ----------------------------------------------------------------------------------------------
+def link_table(jp, r, events, link: dict, t_tx: float, x_min: float, x_cap: float,
+               ber_target: float = 1e-3, modulation: str = "16-QAM", mode: str = "proportional") -> list[dict]:
+    """One row per released event (spec 4.8):
+        x [J]        burst energy (proportional: tau*Pbar at the run slot; fixed_bias: x_cap)
+        P_pk = x/t_tx [W] electrical peak,  radiated = eta_tx * P_pk,  SNR_burst = hbar * P_pk
+        BER          theoretical, ber_func(SNR/bits_per_symbol) of the modulation (Gray-coded QAM)
+        pass         BER <= ber_target ;  nats  (t_tx/2) ln(1 + SNR_burst)  (unweighted by theta2)
+        at_cap       x >= x_cap (1e-9 relative) ;  outcome / release / run / delay from the refusal loop."""
+    from dwf2d.channels import qam_scheme
+    sch = qam_scheme(modulation)
+    k = sch["bits_per_symbol"]
+    hb = float(np.mean(jp.h_bar))
+    rows = []
+    for e in events:
+        row = dict(e)
+        if e["outcome"] in ("run", "rescheduled"):
+            x = x_cap if mode == "fixed_bias" else float(jp.master.tau * r.Pbar[e["run"]])
+            p_pk = x / t_tx
+            snr = hb * p_pk
+            ber = float(sch["ber_func"](snr / k))
+            row.update(x_J=x, P_pk_W=p_pk, radiated_W=link["eta_tx"] * p_pk, snr=snr,
+                       snr_dB=float(10 * np.log10(snr)) if snr > 0 else -np.inf, ber=ber, ber_pass=bool(ber <= ber_target),
+                       nats=0.5 * t_tx * float(np.log1p(snr)), at_cap=bool(x >= x_cap * (1 - 1e-9)),
+                       below_floor=bool(x < x_min * (1 - 1e-9)))
+        else:
+            row.update(x_J=0.0, P_pk_W=0.0, radiated_W=0.0, snr=0.0, snr_dB=-np.inf, ber=np.nan, ber_pass=False,
+                       nats=0.0, at_cap=False, below_floor=False)
+        rows.append(row)
+    return rows
+
+
+def link_report(jp, rr, link: dict, rows: list[dict], profile: dict, sizing: dict | None = None,
+                ber_target: float = 1e-3, banner: str = "", verbose: bool = True) -> dict:
+    """Print the stage-6 THz link report: per-event table (x, P_pk, radiated power, SNR, BER pass/fail, nats),
+    counts (at cap, refused, rescheduled, dropped), supercap sizing (W_req vs W), DUMMY banner, near-field flag.
+    rr is the RefusalResult of physical.solve_with_refusals.  Returns the summary dict."""
+    c = rr.counts
+    refused = sum(len(h["refused"]) for h in rr.history)
+    run_rows = [x for x in rows if x["outcome"] in ("run", "rescheduled")]
+    out = dict(counts=c, refusals=refused, passes=rr.passes, converged=rr.converged,
+               at_cap=sum(x["at_cap"] for x in run_rows), ber_fail=sum(not x["ber_pass"] for x in run_rows),
+               nats_total=float(sum(x["nats"] for x in run_rows)), hbar=float(np.mean(jp.h_bar)),
+               near_field_clamped=bool(link["clamped"]), W=jp.W)
+    if sizing is not None:
+        out.update(W_req=sizing["W_req"], W_design=sizing["W_design"])
+    if not verbose:
+        return out
+    line = "=" * 92
+    if banner:
+        print(banner)
+    print(line)
+    print("THz LINK REPORT  (slave -> third-party receiver; one burst per event)")
+    print(line)
+    clamp = ", CLAMPED to d_nf: d is inside the Friis-invalid region" if link["clamped"] else ""
+    print(f"  preset {link['preset']} ({link['freq_label']}), G_tx/G_rx = {link['g_tx_dbi']:g}/{link['g_rx_dbi']:g} dBi, "
+          f"d = {link['d_m'] * 1e3:.4g} mm (Friis valid beyond {link['d_nf'] * 1e3:.4g} mm{clamp})")
+    print(f"  noise N = {link['noise_w']:.5g} W ({10 * np.log10(link['noise_w']):.2f} dBW), coupling loss {link['coupling_db']:.2f} dB, "
+          f"eta_tx = {link['eta_tx']:g}  ->  hbar = {out['hbar']:.5g} 1/W (electrical burst power -> SNR)")
+    print(f"  t_tx = {profile['t_tx'] * 1e3:.6f} ms, x_min = {profile['x_min'] * 1e3:.5f} mJ (1 mW radiated), "
+          f"x_cap = {profile['x_cap'] * 1e3:.4f} mJ (20 mW radiated), BER target {ber_target:g}")
+    unres = f" | UNRESOLVED {c['unresolved']}" if c.get("unresolved") else ""
+    conv = "" if rr.converged else "  (NOT CONVERGED)"
+    print(f"  events: released {c['released']} | run {c['run']} | rescheduled {c['rescheduled']} | dropped {c['dropped']}"
+          f"{unres} | refusals {refused} in {rr.passes} pass(es){conv}")
+    print(f"  bursts at the cap: {out['at_cap']}/{len(run_rows)} | BER above target: {out['ber_fail']} | "
+          f"nats credited {out['nats_total']:.4g} (x theta2 = {jp.theta2 * out['nats_total']:.4g})")
+    if sizing is not None:
+        ok = "covers" if jp.W + 1e-12 >= sizing["W_req"] else "is BELOW"
+        print(f"  supercap: window W = {jp.W:.4g} J [{jp.B_min:.4g}, {jp.B_max:.4g}] {ok} W_req = {sizing['W_req']:.4g} J "
+              f"(largest event slot {sizing['on_peak']:.4g} J + longest sleep-run drain {sizing['drain_max']:.4g} J)")
+    print()
+    print(f"  {'release':>7s} {'run':>4s} {'delay':>5s} {'outcome':>11s} {'x [mJ]':>8s} {'P_pk [mW]':>9s} {'rad [mW]':>8s} "
+          f"{'SNR [dB]':>8s} {'BER':>9s} {'pass':>4s} {'nats':>7s}")
+    for x in rows:
+        run = "-" if x["run"] is None else str(x["run"])
+        dly = "-" if x["delay"] is None else str(x["delay"])
+        if x["outcome"] in ("run", "rescheduled"):
+            ok = "yes" if x["ber_pass"] else "NO"
+            print(f"  {x['release']:>7d} {run:>4s} {dly:>5s} {x['outcome']:>11s} {x['x_J'] * 1e3:>8.4f} {x['P_pk_W'] * 1e3:>9.2f} "
+                  f"{x['radiated_W'] * 1e3:>8.3f} {x['snr_dB']:>8.2f} {x['ber']:>9.2e} {ok:>4s} {x['nats']:>7.4f}")
+        else:
+            print(f"  {x['release']:>7d} {run:>4s} {dly:>5s} {x['outcome']:>11s}")
+    print()
+    return out
+
+
+def diagnose_no_data(jp, r, stop: list | None = None, profile: dict | None = None, verbose: bool = True) -> dict:
+    """Compact report when the master has no data link (theta1 = 0): diagnose()'s sharing test divides by
+    theta1, so this replaces it.  tau*P is the master's UNUSED / SPILL energy; master throughput and master nats
+    are not reported.  stop = per-slot stopping bound of the maximal-sharing post-pass (solver.maximal_sharing)."""
+    m, tau, a = jp.master, jp.master.tau, jp.a
+    sent, etot = float(r.delta.sum()), float(m.E.sum())
+    out = dict(harvested=etot, sent=sent, unused_spill=float(tau * r.P.sum()), stored=float((a * r.delta).sum()),
+               slave_overhead=float(jp.overhead.sum()), slave_bursts=float(tau * r.Pbar.sum()),
+               final_level_above_floor=float(r.b[-1] - jp.B_min), rate_slave=r.rate_slave, objective=r.objective,
+               shared_fraction=sent / etot if etot else 0.0)
+    if stop is not None:
+        out["stop_counts"] = {s: stop.count(s) for s in sorted(set(stop))}
+    if not verbose:
+        return out
+    line = "=" * 92
+    print(line)
+    print("MASTER (no data link, theta1 = 0) -> SLAVE ENERGY SHARING")
+    print(line)
+    print(f"  tap a = beta*alpha: {_rng(a)}  (alpha {_rng(jp.alpha)}, beta {_rng(jp.beta)})")
+    print(f"  slave supercap: B_min {jp.B_min:.4g} J, B_max {jp.B_max:.4g} J (window {jp.W:.4g} J), b0 {jp.b0:.4g} J")
+    print(f"  harvested {etot:.6g} J = sent {sent:.6g} J ({100 * out['shared_fraction']:.4f}%) + unused / spill "
+          f"{out['unused_spill']:.6g} J (+ master leftover {float(r.F[-1]):.2g})")
+    print(f"  stored {out['stored']:.6g} J + initial excess {jp.g_init:.4g} J = slave electronics {out['slave_overhead']:.6g} J "
+          f"+ THz bursts {out['slave_bursts']:.6g} J + final level above floor {out['final_level_above_floor']:.6g} J")
+    if stop is not None:
+        expl = {"ceiling": "supercap reaches B_max on arrival", "S5": "MPPT input rating", "M5": "laser cap",
+                "master": "master's own energy", "full": "arrived full: delta = 0"}
+        print("  master stops sharing (per slot): " + ", ".join(f"{k} {v} ({expl.get(k, k)})" for k, v in out["stop_counts"].items()))
+    if profile is not None:
+        ks = profile["overhead_keys"]
+        print("  slave electronics (non-TX) per component [J]: " + ", ".join(f"{k} {float(np.sum(profile[k])):.4g}" for k in ks))
+    print(f"  objective {r.objective:.6g} nats = theta2 x slave burst rate {r.rate_slave:.6g} nats | iters {r.iters} | "
+          f"converged {r.converged} | start {r.start}")
+    print()
+    return out

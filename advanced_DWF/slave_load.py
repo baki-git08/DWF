@@ -357,8 +357,14 @@ def make_load(jp, timing: SlotTiming | None = None, hw: SlaveHardware | None = N
 
 def attach_slave_load(jp, timing: SlotTiming | None = None, *, size_storage: bool = False,
                       use_mppt_cap: bool = True, eta_tx: float | None = None,
-                      hw: SlaveHardware | None = None):
-    """Return a COPY of jp with the slave electronics attached:
+                      hw: SlaveHardware | None = None, model: str = "slot"):
+    """Return a COPY of jp with the slave electronics attached.
+
+    model = "slot" (default): the stage-5 per-slot model below (legacy_demo / physical_demo).
+    model = "event": the stage-6 event-based slave, see attach_event_load() (timing / size_storage / use_mppt_cap /
+            eta_tx do not apply there; everything comes from the STAGE 6 block of slave_config.py).
+
+    Slot model:
 
         slave_overhead_J = c  (camera + MCU + memory + MPPT; no TX)
         mppt_cap_J       = V_in * I_max * eta * tau   (S5), or None if use_mppt_cap is False
@@ -368,6 +374,10 @@ def attach_slave_load(jp, timing: SlotTiming | None = None, *, size_storage: boo
 
     The schedule is read from jp.slave_schedule.  Not idempotent: attaching twice scales h_bar twice.
     """
+    if model == "event":
+        return attach_event_load(jp, hw=hw)
+    if model != "slot":
+        raise ValueError(f"model must be 'slot' or 'event', got {model!r}")
     hw = hw or SlaveHardware()
     n = jp.master.N
     if abs(cfg.TAU_S - jp.master.tau) > 1e-9:
@@ -397,6 +407,250 @@ def attach_slave_load(jp, timing: SlotTiming | None = None, *, size_storage: boo
         kw["B_max"] = jp.B_min + sz["W_std"]
         kw["b0"] = jp.B_min + sz["lead"]
     return replace(jp, **kw)
+
+
+# ----------------------------------------------------------------------------------------
+# STAGE 6: event-based slave model (slave_config.py "STAGE 6" block; used by integrated_demo)
+# ----------------------------------------------------------------------------------------
+#   An EVENT = camera readout -> PSRAM write -> PSRAM read + THz burst, released by SLAVE_SCHEDULE.
+#   Durations are per event (not per slot).  For slot i with the EFFECTIVE schedule s_i (after refusals):
+#       event slot : c_i = sum_comp [P_active * t_active + P_sleep * (tau - t_active)]   (photomixer active term excluded)
+#       sleep slot : c_i = sum_comp  P_sleep * tau
+#   The photomixer's active energy is the DWF burst variable x_i = tau*Pbar_i in [x_min, x_cap] ("proportional"),
+#   or the fixed P_PM_ELEC_W * t_tx added to c_i ("fixed_bias").
+EVENT_REQUIRED = ("key", "active_W", "active_terms", "sleep_W")
+
+
+def dummy_banner() -> str:
+    """One line naming the event-model values that are still DUMMY / PLACEHOLDER (slave_config.DUMMY_VALUES)."""
+    names = tuple(getattr(cfg, "DUMMY_VALUES", ()))
+    return ("slave model: DUMMY values in use (edit slave_config.py): " + ", ".join(names)) if names else ""
+
+
+def bits_per_symbol(modulation: str | None = None) -> int:
+    """Bits per symbol of slave_config.MODULATION (16-QAM -> 4)."""
+    from dwf2d.channels import QAM_SPLIT
+    m = cfg.MODULATION if modulation is None else modulation
+    if m not in QAM_SPLIT:
+        raise ValueError(f"MODULATION {m!r} is not one of {sorted(QAM_SPLIT)}")
+    return sum(QAM_SPLIT[m])
+
+
+def tx_time_s(payload_bytes: float | None = None, r_s: float | None = None, modulation: str | None = None) -> float:
+    """THz burst duration t_tx = payload_bits / (R_s * bits_per_symbol)  [s]  (16.777216 ms for 8 MiB, 1 Gsps, 16-QAM)."""
+    payload = cfg.PAYLOAD_BYTES if payload_bytes is None else payload_bytes
+    rs = cfg.R_s if r_s is None else r_s
+    if payload <= 0 or rs <= 0:
+        raise ValueError("PAYLOAD_BYTES and R_s must be > 0")
+    return payload * 8 / (rs * bits_per_symbol(modulation))
+
+
+def tx_bounds_J(t_tx: float | None = None) -> dict[str, float]:
+    """Electrical burst-energy bounds of one event [J]:
+        x_cap = P_PM_ELEC_W * t_tx                    (20 mW radiated, 3.3554 mJ)
+        x_min = (P_PM_RAD_MIN_W / ETA_TX_PM) * t_tx   (1 mW radiated,  0.16777 mJ)"""
+    t = tx_time_s() if t_tx is None else t_tx
+    return dict(t_tx=t, x_cap=cfg.P_PM_ELEC_W * t, x_min=cfg.P_PM_RAD_MIN_W / cfg.ETA_TX_PM * t)
+
+
+def event_profile(schedule, tau: float | None = None, psram_state: str | None = None,
+                  components: list | None = None, durations: dict | None = None,
+                  pm_mode: str | None = None, n_slots: int | None = None) -> dict:
+    """Per-slot NON-TX energy [J] of the event model, one array per component plus c = their sum.
+
+    schedule  : effective 0/1 per slot (1 = an event runs there); n_slots repeats a shorter pattern cyclically.
+    pm_mode   : "proportional" (default from config): the photomixer's active energy is NOT in c (it is x_i);
+                "fixed_bias": it is, as P_active * t_tx per event.
+    Raises ValueError naming the field and slot for a negative / non-finite duration, a per-slot array of the
+    wrong length, or an active time longer than tau.
+    Returns dict(<component key>: array, c, overhead_keys, is_event, t_active, durations, t_tx, x_cap, x_min,
+                 tau, psram_state, pm_mode, pm_fixed_J).
+    """
+    sch = np.asarray(schedule).ravel()
+    if sch.size == 0 or not np.all((sch == 0) | (sch == 1)):
+        raise ValueError("event schedule must be a non-empty array of 0s and 1s (EVENTS_PER_SLOT_MAX = 1)")
+    if getattr(cfg, "EVENTS_PER_SLOT_MAX", 1) != 1:
+        raise ValueError("only EVENTS_PER_SLOT_MAX = 1 is modelled")
+    if n_slots is not None and sch.size != n_slots:
+        sch = np.resize(sch, n_slots)
+    sch = sch.astype(bool)
+    n = sch.size
+    tau = cfg.TAU_S if tau is None else float(tau)
+    state = cfg.PSRAM_SILENT_STATE if psram_state is None else psram_state
+    mode = cfg.PM_DC_MODE if pm_mode is None else pm_mode
+    if mode not in ("proportional", "fixed_bias"):
+        raise ValueError(f"PM_DC_MODE must be 'proportional' or 'fixed_bias', got {mode!r}")
+    comps = cfg.EVENT_COMPONENTS if components is None else components
+    tb = tx_bounds_J()
+    dur = {k: _as_slot_array("EVENT_DURATIONS", k, v, n) for k, v in dict(cfg.EVENT_DURATIONS if durations is None else durations).items()}
+    if "t_tx" in dur:
+        raise ValueError("EVENT_DURATIONS.t_tx is derived from PAYLOAD_BYTES, R_s and MODULATION; do not set it")
+    dur["t_tx"] = np.full(n, tb["t_tx"])
+    for k, v in dur.items():
+        bad = np.flatnonzero(~np.isfinite(v) | (v < 0))
+        if bad.size:
+            raise ValueError(f"EVENT_DURATIONS.{k} must be >= 0 and finite (slot {bad[0]}: {v[bad[0]]})")
+    tol = 1e-12 * max(tau, 1.0)
+    out: dict = {}
+    t_active: dict = {}
+    keys = []
+    for row in comps:
+        miss = [f for f in EVENT_REQUIRED if f not in row]
+        if miss:
+            raise ValueError(f"EVENT_COMPONENTS row {row.get('key', '?')!r} is missing {miss}")
+        key = row["key"]
+        for term in row["active_terms"]:
+            if term not in dur:
+                raise ValueError(f"EVENT_COMPONENTS.{key}: unknown duration {term!r} (known: {sorted(dur)})")
+        ta = sum((dur[t] for t in row["active_terms"]), np.zeros(n))
+        over = np.flatnonzero(ta > tau + tol)
+        if over.size:
+            raise ValueError(f"EVENT_COMPONENTS.{key}: active time {ta[over[0]]:g} s exceeds tau = {tau:g} s (slot {over[0]})")
+        p_s = row["sleep_W"]
+        if isinstance(p_s, dict):
+            if state not in p_s:
+                raise ValueError(f"EVENT_COMPONENTS.{key}: sleep_W has no entry for PSRAM_SILENT_STATE = {state!r}")
+            p_s = p_s[state]
+        p_a = float(row["active_W"])
+        in_c = bool(row.get("in_c", True))
+        active_in_c = in_c or mode == "fixed_bias"
+        e_event = (p_a * ta if active_in_c else 0.0) + p_s * (tau - ta)
+        out[key] = np.where(sch, e_event, p_s * tau)
+        t_active[key] = np.where(sch, ta, 0.0)
+        keys.append(key)
+    out["c"] = sum(out[k] for k in keys)
+    pm = next((r for r in comps if not r.get("in_c", True)), None)
+    out.update(overhead_keys=tuple(keys), is_event=sch, t_active=t_active, durations=dur, tau=tau,
+               psram_state=state, pm_mode=mode,
+               pm_fixed_J=(float(pm["active_W"]) * tb["t_tx"] if (pm is not None and mode == "fixed_bias") else 0.0),
+               **tb)
+    return out
+
+
+def thz_link(preset: str | None = None, d_m: float | None = None, legacy_gains: bool | None = None) -> dict:
+    """The slave's THz link from slave_config (THZ_PRESET, D_THZ_M, gains, noise, ETA_TX_PM):
+    dwf2d.channels.thz_hbar() plus the labels.  hbar [1/W] maps the ELECTRICAL burst power to SNR and already
+    contains ETA_TX_PM.  Returns dict(preset, freq_label, freq_hz, hbar, d_m, d_eff, d_nf, clamped, coupling_db,
+    g_tx_dbi, g_rx_dbi, noise_w, eta_tx)."""
+    from dwf2d import channels as ch
+    p = cfg.THZ_PRESET if preset is None else preset
+    if p not in cfg.THZ_PRESETS:
+        raise ValueError(f"THZ_PRESET {p!r} is not one of {sorted(cfg.THZ_PRESETS)}")
+    label = cfg.THZ_PRESETS[p]
+    f = cfg.THZ_FREQS_HZ[label]
+    leg = cfg.LEGACY_GAINS if legacy_gains is None else legacy_gains
+    g_tx, g_rx = ch.LEGACY_GAIN_DBI if leg else cfg.GAIN_DBI_BY_FREQ[label]
+    d = cfg.D_THZ_M if d_m is None else d_m
+    n_w = ch.noise_floor_w(cfg.NOISE_MODE, cfg.T_NOISE_K, cfg.NOISE_FIGURE_DB, cfg.R_s)
+    res = ch.thz_hbar(f, d, g_tx, g_rx, eta_tx=cfg.ETA_TX_PM, noise_w=n_w, alpha=cfg.ALPHA_THZ)
+    return dict(res, preset=p, freq_label=label, freq_hz=f, d_m=d, eta_tx=cfg.ETA_TX_PM)
+
+
+def supercap_window(c_f: float | None = None, hw: "SlaveHardware | None" = None) -> tuple[float, float]:
+    """(B_min, B_max) [J] of a supercap of c_f farads over POWERS v_store_min..v_store_max:  E = C V^2 / 2."""
+    hw = hw or SlaveHardware()
+    c = cfg.SUPERCAP_F if c_f is None else float(c_f)
+    if c <= 0:
+        raise ValueError("SUPERCAP_F must be > 0")
+    return 0.5 * c * hw.v_store_min ** 2, 0.5 * c * hw.v_store_max ** 2
+
+
+def attach_event_load(jp, *, link: dict | None = None, pm_mode: str | None = None, psram_state: str | None = None,
+                      supercap_f: float | None = None, hw: SlaveHardware | None = None):
+    """Return a COPY of jp with the stage-6 event-based slave attached (attach_slave_load(..., model="event")).
+
+    The EFFECTIVE event schedule is jp.slave_schedule (1 = an event runs in that slot).  Sets
+        slave_overhead_J  = c_i of event_profile()  (non-TX; fixed_bias adds P_PM_ELEC_W*t_tx per event)
+        mppt_cap_J        = mppt_in_V * mppt_in_I_max * MPPT_EFF * tau        (S5, 18.81 J)
+        h_bar             = thz_link()["hbar"]  (already contains ETA_TX_PM: scaled ONCE, here)
+        tx_cap_J          = x_cap in event slots, 0 elsewhere  ("proportional");  0 everywhere ("fixed_bias")
+        slave_rate_window = t_tx                                                (burst rate)
+        delta_cap_J       = LASER_P_OPT_MAX_W * tau / ETA_LD   (M5; None when LASER_P_OPT_MAX_W is None)
+        B_min, B_max      = supercap_window(SUPERCAP_F),  b0 = B_min
+    The x_min floor is NOT a bound: an event below it is refused (physical.solve_with_refusals).
+    Idempotent (every field is set from slave_config, nothing is scaled in place).
+    """
+    hw = hw or SlaveHardware()
+    if abs(cfg.TAU_S - jp.master.tau) > 1e-9:
+        raise ValueError(f"slave_config.TAU_S = {cfg.TAU_S:g} s but MasterParams.tau = {jp.master.tau:g} s")
+    sch = np.asarray(jp.slave_schedule, dtype=int)
+    prof = event_profile(sch, jp.master.tau, psram_state=psram_state, pm_mode=pm_mode)
+    lk = thz_link() if link is None else link
+    b_min, b_max = supercap_window(supercap_f, hw)
+    tau = jp.master.tau
+    fixed = prof["pm_mode"] == "fixed_bias"
+    kw = dict(slave_overhead_J=prof["c"].copy(),
+              mppt_cap_J=hw.mppt_in_V * hw.mppt_in_I_max_A * cfg.MPPT_EFF * tau,
+              h_bar=float(lk["hbar"]),
+              tx_cap_J=np.zeros(sch.size) if fixed else np.where(sch == 1, prof["x_cap"], 0.0),
+              slave_rate_window=prof["t_tx"],
+              delta_cap_J=(None if cfg.LASER_P_OPT_MAX_W is None else cfg.LASER_P_OPT_MAX_W * tau / cfg.ETA_LD),
+              B_min=b_min, B_max=b_max, b0=b_min)
+    return replace(jp, **kw)
+
+
+def make_event_load(jp, hw: SlaveHardware | None = None, pm_mode: str | None = None,
+                    psram_state: str | None = None) -> dict:
+    """Reporting context of the event model (plots / CSV / link report), like make_load() for the slot model:
+    event_profile() of jp.slave_schedule (the EFFECTIVE schedule) + the supercap sizing with every burst at x_cap:
+        W_req = largest event-slot load (c + x_cap) + longest sleep-run drain   (size_storage, STORAGE_MARGIN for W_design)
+    plus the DUMMY banner (slave_config.DUMMY_VALUES)."""
+    hw = hw or SlaveHardware()
+    sch = np.asarray(jp.slave_schedule, dtype=int)
+    prof = event_profile(sch, jp.master.tau, psram_state=psram_state, pm_mode=pm_mode)
+    burst = 0.0 if prof["pm_mode"] == "fixed_bias" else prof["x_cap"]
+    sizing = size_storage(hw, prof["c"] + burst * sch, sch)
+    return dict(prof, hw=hw, sizing=sizing, schedule=sch, timing_is_dummy=bool(getattr(cfg, "DUMMY_VALUES", ())),
+                banner=dummy_banner(), tau=jp.master.tau)
+
+
+@dataclass
+class SlaveState:
+    """Run-time state of one slave (indexed by slave id; one slave for now).
+
+    level_J  : supercap level [J]           pending : FIFO of (release_slot, age_slots) waiting to run
+    counters : released / run / rescheduled / dropped events"""
+    slave_id: int = 0
+    level_J: float = 0.0
+    pending: list = dataclasses.field(default_factory=list)
+    released: int = 0
+    run: int = 0
+    rescheduled: int = 0
+    dropped: int = 0
+
+
+def new_slave_states(n_slaves: int = 1, level_J: float = 0.0) -> dict[int, SlaveState]:
+    """{slave_id: SlaveState} for n_slaves slaves (arrays elsewhere are sized from the schedule length)."""
+    return {i: SlaveState(slave_id=i, level_J=level_J) for i in range(n_slaves)}
+
+
+def reschedule(effective, refused, release_of: dict, max_delay: int | None = None):
+    """Move refused events to the next available slot (greedy; mirrors the hardware: wake, check, refuse).
+
+    effective  : 0/1 per slot (1 = an event runs there), modified copy returned
+    refused    : run slots whose event is refused this pass (processed in ascending order)
+    release_of : {run_slot: release_slot} for every event currently placed (updated copy returned)
+    For each refused slot i: effective[i] = 0 (nothing powers up there); the event goes to the FIRST slot
+    j > i with effective[j] == 0 (no event of its own) and j - release <= max_delay; else it is dropped.
+    Returns (effective, release_of, moves [(from, to, release)], dropped [(from, release)]).
+    """
+    eff = np.asarray(effective, dtype=int).copy()
+    rel = dict(release_of)
+    md = cfg.MAX_DELAY_SLOTS if max_delay is None else int(max_delay)
+    moves, dropped = [], []
+    for i in sorted(int(k) for k in refused):
+        if not eff[i]:
+            raise ValueError(f"slot {i} is refused but carries no event")
+        r0 = rel.pop(i)
+        eff[i] = 0
+        j = next((j for j in range(i + 1, min(len(eff), r0 + md + 1)) if eff[j] == 0), None)
+        if j is None:
+            dropped.append((i, r0))
+        else:
+            eff[j] = 1
+            rel[j] = r0
+            moves.append((i, j, r0))
+    return eff, rel, moves, dropped
 
 
 # ----------------------------------------------------------------------------------------

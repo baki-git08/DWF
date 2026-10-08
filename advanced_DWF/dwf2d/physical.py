@@ -47,6 +47,7 @@ def physical_stored_power(
     fill_factor: float = 1.0,
     temp_K: float = 300.0,
     battery_tol_J: float = 1e-6,
+    supercap_eff: float = 1.0,
 ) -> PhysicalStorageResult:
     """Run the solver's delta schedule through the real photodiode+MPPT chain.
 
@@ -68,6 +69,10 @@ def physical_stored_power(
         S2 are frequently active) will show a residual of about that size even at an exact beta
         calibration. This must stay looser than that residual, or every such slot reads as a false
         "violation" instead of a real infeasibility.
+
+    supercap_eff : storage efficiency of the slave supercap (slave_config.ETA_SC).  Stored energy =
+        supercap_eff x MPPT output, so eff_phys (and the beta that solve_with_physical_chain calibrates to it)
+        is the full secant gain  R x MPPT_EFF x ETA_SC  of PV array -> MPPT -> supercap.  1.0 (default) = off.
     """
     m = jp.master
     tau = m.tau
@@ -76,6 +81,8 @@ def physical_stored_power(
         fill_factor=fill_factor, temp_K=temp_K,
     )
     stored_raw = chain.mppt_output_power                          # what the photodiode + MPPT chain would deliver
+    if supercap_eff != 1.0:                                       # supercap storage loss (ETA_SC), inside beta
+        stored_raw = supercap_eff * stored_raw
     with np.errstate(divide="ignore", invalid="ignore"):
         eff_phys = np.where(r.arrived_power > 0, stored_raw / np.where(r.arrived_power > 0, r.arrived_power, 1.0), np.nan)
     # MPPT input rating (S5): physical_chain.py does not saturate, so clip here.  The energy above
@@ -128,6 +135,8 @@ def solve_with_physical_chain(
     temp_K: float = 300.0,
     tol: float = 1e-3,
     max_outer: int = 30,
+    supercap_eff: float = 1.0,
+    solver_kw: dict | None = None,
 ):
     """Fixed-point calibration: re-solve joint_dwf() with a per-slot beta equal to the real
     photodiode+MPPT chain's secant gain, until beta stops changing. joint_dwf() itself is never
@@ -146,6 +155,12 @@ def solve_with_physical_chain(
     Slots with delta_i == 0 have nothing to calibrate on (arrived_power_i == 0 -> eff_phys_i is
     NaN); their beta is left unchanged from the previous iterate.
 
+    supercap_eff (slave_config.ETA_SC) is passed to physical_stored_power, so the calibrated beta_i is the
+    full chain gain R x MPPT_EFF x ETA_SC (mppt_efficiency carries MPPT_EFF).  1.0 (default) = off.
+
+    solver_kw : extra joint_dwf() arguments (tol, max_iter, cross_run, x0); None = joint_dwf defaults.  An x0 warm
+    start is used for the first outer iteration only (later ones start from joint_dwf's own start point).
+
     Returns (jp_calibrated, r, ph, n_outer):
         jp_calibrated : JointParams with the converged per-slot beta
         r             : final JointResult from joint_dwf(jp_calibrated)
@@ -158,8 +173,15 @@ def solve_with_physical_chain(
     ph = None
     for n_outer in range(1, max_outer + 1):
         jp_i = dataclasses.replace(jp, beta=beta.copy())
-        r = joint_dwf(jp_i)
-        ph = physical_stored_power(jp_i, r, wavelength_nm, mppt_efficiency, fill_factor, temp_K)
+        if solver_kw:
+            kw = dict(solver_kw)
+            if n_outer > 1:
+                kw.pop("x0", None)
+            r = joint_dwf(jp_i, **kw)
+        else:
+            r = joint_dwf(jp_i)
+        ph = physical_stored_power(jp_i, r, wavelength_nm, mppt_efficiency, fill_factor, temp_K,
+                                   supercap_eff=supercap_eff)
         on = r.delta > 1e-9 * max(jp.master.E.mean(), 1.0)         # only calibrate where energy actually moves
         beta_new = beta.copy()
         beta_new[on] = ph.eff_phys[on]
@@ -168,3 +190,135 @@ def solve_with_physical_chain(
         if moved < tol:
             break
     return jp_i, r, ph, n_outer
+
+
+# ----------------------------------------------------------------------------
+# Stage 6: event refusal and rescheduling (outer loop around the calibrated solve)
+# ----------------------------------------------------------------------------
+@dataclass
+class RefusalResult:
+    """Outcome of solve_with_refusals().
+
+    jp, r, ph : the final calibrated problem, its JointResult and PhysicalStorageResult (effective schedule)
+    events    : one dict per RELEASED event: release, run (slot or None), delay, x_J (burst energy), outcome
+                ("run" at its release slot, "rescheduled" = ran later, "dropped", or "unresolved" when the loop did
+                not converge: placed, but no consistent solution exists for that placement)
+    effective : final effective schedule (1 = an event ran there)
+    passes    : number of solves;  converged : False if the pass cap was hit (the schedule is then NOT consistent)
+    history   : per pass dict(refused, moves, dropped, start, reason)
+    """
+    jp: JointParams
+    r: JointResult
+    ph: PhysicalStorageResult
+    events: list
+    effective: np.ndarray
+    passes: int
+    converged: bool
+    history: list
+    n_outer: int = 0
+
+    @property
+    def counts(self) -> dict:
+        c = {"released": len(self.events)}
+        for o in ("run", "rescheduled", "dropped", "unresolved"):
+            c[o] = sum(e["outcome"] == o for e in self.events)
+        return c
+
+
+def solve_with_refusals(build_jp, schedule, x_min: float, max_delay: int, *, mode: str = "proportional",
+                        max_passes: int | None = None, warm: bool = True, calib_kw: dict | None = None,
+                        solver_kw: dict | None = None, calibrate: bool = True) -> RefusalResult:
+    """Greedy refusal / reschedule loop of the stage-6 slave (mirrors the hardware: wake, check, refuse).
+
+        effective = schedule (events released);  queue empty
+        repeat (at most #events * (max_delay + 1) + 1 passes):
+            solve_with_physical_chain(build_jp(effective))           (beta carried over from the previous pass)
+            refused = run slots with x_i < x_min                     ("proportional", x_i = tau*Pbar_i, incl. x_i = 0)
+                      or, if the solve raises InfeasibleSlaveBudget ("fixed_bias", or an unaffordable event load),
+                      the latest run event at or before the first slot where even the fullest supercap
+                      trajectory (solver.fullest_trajectory, bursts 0) drops below B_min
+            none refused -> done
+            each refused event: its slot goes back to sleep load; it moves to the first later slot with no event
+            of its own and at most max_delay slots after its RELEASE, else it is dropped (slave_load.reschedule)
+
+    build_jp(effective) -> JointParams with the event load for that effective schedule (slave_load.attach_event_load);
+    physical.py never imports slave_load.  Warm start: the previous pass's flows when they satisfy the new bounds.
+    Termination: every pass moves an event strictly later or drops it, and delays are bounded.  If the pass cap is
+    hit, converged = False.  This is a greedy rule, NOT a combinatorial optimum (see the brute-force check).
+    calibrate = False solves joint_dwf directly (beta as given, ph = None): used by the brute-force comparison.
+    """
+    import slave_load                                        # queue logic only (lazy: keeps the import graph acyclic)
+    from .solver import InfeasibleSlaveBudget, fullest_trajectory, warm_start_from
+    sch = np.asarray(schedule, dtype=int).ravel()
+    released = [int(i) for i in np.flatnonzero(sch)]
+    release_of = {i: i for i in released}
+    effective = sch.copy()
+    #   each event can be refused max_delay times (moved) plus once more (dropped); one last pass confirms
+    cap = len(released) * (max(int(max_delay), 0) + 1) + 1 if max_passes is None else int(max_passes)
+    calib_kw = dict(calib_kw or {})
+    history, dropped_all = [], []
+    beta, x0 = None, None
+    jp_c = r = ph = None
+    n_outer = 0
+    converged = False
+    passes = 0
+    for passes in range(1, cap + 1):
+        jp = build_jp(effective)
+        if beta is not None:
+            jp = dataclasses.replace(jp, beta=beta)
+        skw = dict(solver_kw or {})
+        if warm and x0 is not None:
+            skw["x0"] = x0
+        try:
+            if calibrate:
+                jp_c, r, ph, n_outer = solve_with_physical_chain(jp, solver_kw=skw, **calib_kw)
+            else:
+                jp_c, r, ph, n_outer = jp, joint_dwf(jp, **skw), None, 0
+        except InfeasibleSlaveBudget as e:
+            # Wake, check, refuse: the first slot where even the FULLEST supercap trajectory (master sharing all
+            # it can, bursts at 0) falls below B_min.  An event there is refused; in a sleep slot the latest event
+            # before it is.  No event to blame -> the base (sleep) load itself is unaffordable: stop, unresolved.
+            ft = fullest_trajectory(jp, np.zeros(jp.master.N))
+            k0 = ft["fail_slot"]
+            if k0 is None:                                   # floor reachable: another bound (S5/M5/terminal)
+                k0 = min(e.slots) if e.slots else jp.master.N - 1
+            before = [i for i in release_of if i <= k0]
+            if not before:
+                history.append(dict(refused=[], moves=[], dropped=[], start="infeasible",
+                                    reason=f"infeasible at slot {k0} with no event at or before it: {e}"))
+                jp_c = r = ph = None
+                break
+            refused, reason = [max(before)], f"supercap short at slot {k0}"
+            jp_c = r = ph = None
+        else:
+            beta = jp_c.beta.copy()
+            x = jp_c.master.tau * r.Pbar
+            refused = [i for i in sorted(release_of) if x[i] < x_min * (1 - 1e-9)] if mode == "proportional" else []
+            #   (x_i < x_min includes x_i = 0: no event spends its camera/MCU/PSRAM energy without transmitting)
+            reason = "x < x_min"
+            if not refused:
+                converged = True
+                history.append(dict(refused=[], moves=[], dropped=[], start=r.start, reason="all events affordable"))
+                break
+            x0 = warm_start_from(jp_c, r)
+        effective, release_of, moves, dropped = slave_load.reschedule(effective, refused, release_of, max_delay)
+        dropped_all += dropped
+        history.append(dict(refused=refused, moves=moves, dropped=dropped, start=r.start if r is not None else "infeasible",
+                            reason=reason))
+    events = []
+    run_of = {rel: run for run, rel in release_of.items()}
+    xfin = jp_c.master.tau * r.Pbar if (converged and r is not None) else None
+    for rel in released:
+        run = run_of.get(rel)
+        if run is None:
+            events.append(dict(release=rel, run=None, delay=None, x_J=0.0, outcome="dropped"))
+        elif not converged:                                  # no consistent solution for this placement
+            events.append(dict(release=rel, run=run, delay=run - rel, x_J=np.nan, outcome="unresolved"))
+        else:
+            events.append(dict(release=rel, run=run, delay=run - rel, x_J=float(xfin[run]),
+                               outcome="run" if run == rel else "rescheduled"))
+    n = {o: sum(e["outcome"] == o for e in events) for o in ("run", "rescheduled", "dropped", "unresolved")}
+    if sum(n.values()) != len(released) or (converged and n["unresolved"]):   # no event may disappear
+        raise AssertionError(f"event bookkeeping: {n} vs released {len(released)}")
+    return RefusalResult(jp=jp_c, r=r, ph=ph, events=events, effective=effective, passes=passes,
+                         converged=converged, history=history, n_outer=n_outer)

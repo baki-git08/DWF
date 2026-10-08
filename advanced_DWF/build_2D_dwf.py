@@ -151,13 +151,14 @@ from physical_chain import optical_to_electrical, OpticalReceiveChainResult
 # ----------------------------------------------------------------------------
 # The implementation lives in the dwf2d package (one module per concern); this module re-exports every
 # name it has always defined, so `from build_2D_dwf import ...` and `python build_2D_dwf.py` are unchanged.
-#   dwf2d/channels.py      beer_lambert, THz absorption table, thz_gain
+#   dwf2d/channels.py      beer_lambert, THz absorption table, thz_gain; stage 6: THz photomixer link budget
+#                          (thz_hbar, link_budget, near-field limit), uowc_alpha, modulation engine
 #   dwf2d/params.py        JointParams, JointResult
 #   dwf2d/solver.py        joint_dwf (+ feasible start points, InfeasibleSlaveBudget)
 #   dwf2d/physical.py      physical receive chain post-processing and beta calibration
 #   dwf2d/verification.py  check_kkt_joint, reference_solution_joint (cvxpy)
 #   dwf2d/plotting/        style helpers, joint plots, physical-chain plots, slave-load panels + CSV
-#   dwf2d/demos.py         legacy_demo, physical_demo
+#   dwf2d/demos.py         legacy_demo, physical_demo, integrated_demo (stage 6)
 # ----------------------------------------------------------------------------
 from dwf2d.channels import (  # noqa: F401
     beer_lambert,
@@ -166,6 +167,14 @@ from dwf2d.channels import (  # noqa: F401
     thz_alpha_m,
     thz_freq,
     thz_gain,
+    # stage 6
+    link_budget,
+    near_field_limit_m,
+    noise_floor_w,
+    thz_hbar,
+    uowc_alpha,
+    make_link_simulator,
+    qam_scheme,
 )
 from dwf2d.params import (  # noqa: F401
     JointParams,
@@ -176,15 +185,27 @@ from dwf2d.solver import (  # noqa: F401
     joint_dwf,
     _jit_start,
     _lp_start,
+    # stage 6
+    fullest_trajectory,
+    maximal_sharing,
+    warm_start_from,
 )
 from dwf2d.physical import (  # noqa: F401
     physical_stored_power,
     PhysicalStorageResult,
     solve_with_physical_chain,
+    # stage 6
+    RefusalResult,
+    solve_with_refusals,
 )
 from dwf2d.verification import (  # noqa: F401
     check_kkt_joint,
     reference_solution_joint,
+    # stage 6
+    brute_force_events,
+    check_maximal_sharing,
+    parity_matrix,
+    refusal_gate,
 )
 from dwf2d.plotting.style import (  # noqa: F401
     BITS_PER_NAT,
@@ -227,6 +248,7 @@ from dwf2d.plotting.slave_panels import (  # noqa: F401
     C_MPPT,
     LOAD_COLORS,
     LOAD_LABELS,
+    plot_event_bursts,
     plot_slave_battery_window,
     plot_slave_cumulative_energy,
     plot_slave_energy_breakdown,
@@ -234,10 +256,30 @@ from dwf2d.plotting.slave_panels import (  # noqa: F401
     slave_load_components,
     write_slave_energy_csv,
 )
+from dwf2d.plotting.thz_link import (  # noqa: F401   (stage 6: the notebook's THz-link figures)
+    ThzLinkSetup,
+    notebook_schemes,
+    plot_ber_sweep,
+    plot_ber_vs_distance_gains,
+    plot_constellations,
+    plot_eye_diagrams,
+    plot_gain_vs_aperture,
+    plot_link_characteristics,
+    plot_max_range_heatmap,
+    plot_max_range_vs_gain,
+    plot_sim_vs_theory,
+    plot_snr_power_vs_distance,
+    setup_from_slave_config,
+    simulate_demo,
+    simulate_validation,
+    write_thz_link_plots,
+)
 from dwf2d.demos import (  # noqa: F401
     legacy_demo,
     physical_demo,
+    integrated_demo,
     _demo_problem,
+    _integrated_problem,
     _run_demo,
 )
 
@@ -248,15 +290,18 @@ from dwf2d.demos import (  # noqa: F401
 #                   The result is at DUMMY durations and placeholder h0 / theta2; it differs from legacy_demo
 #                   by orders of magnitude in slave data energy (the real electronics cannot absorb the
 #                   legacy stage-4 flows).  That is expected, not a solver bug: inputs are NOT retuned.
+#   integrated_demo : stage 6, master = UOWC energy only, slave = THz bursts in events (slave_config.py STAGE 6
+#                   block); writes to out_integrated_demo/.
 # ----------------------------------------------------------------------------
 # DEMO = "legacy_demo"
-DEMO = "physical_demo"
+DEMO = "integrated_demo"
 
 
 if __name__ == "__main__":
     import sys
-    # Run as a script:  python build_2D_dwf.py [legacy_demo | physical_demo]   (or edit DEMO above)
+    # Run as a script:  python build_2D_dwf.py [legacy_demo | physical_demo | integrated_demo]   (or edit DEMO above)
     which = sys.argv[1] if len(sys.argv) > 1 else DEMO
-    if which not in ("legacy_demo", "physical_demo"):
-        raise SystemExit("usage: python build_2D_dwf.py [legacy_demo | physical_demo]")
-    {"legacy_demo": legacy_demo, "physical_demo": physical_demo}[which]()
+    demos = {"legacy_demo": legacy_demo, "physical_demo": physical_demo, "integrated_demo": integrated_demo}
+    if which not in demos:
+        raise SystemExit("usage: python build_2D_dwf.py [legacy_demo | physical_demo | integrated_demo]")
+    demos[which]()

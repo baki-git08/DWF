@@ -1,0 +1,51 @@
+slave model: DUMMY values in use (edit slave_config.py): ETA_SC, ETA_LD, LASER_P_OPT_MAX_W, MAX_DELAY_SLOTS, D_UOWC_M
+integrated_demo: 60 slots, 14 events released, preset 0.3THz, refusal loop 1 pass(es), converged True
+============================================================================================
+MASTER (no data link, theta1 = 0) -> SLAVE ENERGY SHARING
+============================================================================================
+  tap a = beta*alpha: min 0.3608 | mean 0.3608 | max 0.3608  (alpha min 1 | mean 1 | max 1, beta min 0.3608 | mean 0.3608 | max 0.3608)
+  slave supercap: B_min 0.1137 J, B_max 0.6354 J (window 0.5217 J), b0 0.1137 J
+  harvested 227633 J = sent 11.2673 J (0.0049%) + unused / spill 227622 J (+ master leftover 5.8e-11)
+  stored 4.06475 J + initial excess 0 J = slave electronics 3.51204 J + THz bursts 0.0469762 J + final level above floor 0.505738 J
+  master stops sharing (per slot): ceiling 60 (supercap reaches B_max on arrival)
+  slave electronics (non-TX) per component [J]: camera 2.136, mcu 0.5004, flash 0.8669, mppt 0.005184, photomixer 0.0036
+  objective 2.56242 nats = theta2 x slave burst rate 0.854141 nats | iters 2 | converged True | start just-in-time + maximal-sharing
+
+============================================================================================
+THz LINK REPORT  (slave -> third-party receiver; one burst per event)
+============================================================================================
+  preset 0.3THz (0.3 THz), G_tx/G_rx = 10/10 dBi, d = 1 mm (Friis valid beyond 0.7958 mm)
+  noise N = 4.0039e-11 W (-103.98 dBW), coupling loss 55.40 dB, eta_tx = 0.1  ->  hbar = 7199.1 1/W (electrical burst power -> SNR)
+  t_tx = 16.777216 ms, x_min = 0.16777 mJ (1 mW radiated), x_cap = 3.3554 mJ (20 mW radiated), BER target 0.001
+  events: released 14 | run 14 | rescheduled 0 | dropped 0 | refusals 0 in 1 pass(es)
+  bursts at the cap: 14/14 | BER above target: 0 | nats credited 0.8541 (x theta2 = 2.562)
+  supercap: window W = 0.5217 J [0.1137, 0.6354] covers W_req = 0.3933 J (largest event slot 0.2018 J + longest sleep-run drain 0.1915 J)
+
+  release  run delay     outcome   x [mJ] P_pk [mW] rad [mW] SNR [dB]       BER pass    nats
+        1    1     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       14   14     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       15   15     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       16   16     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       21   21     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       22   22     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       23   23     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       31   31     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       44   44     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       45   45     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       46   46     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       51   51     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       52   52     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+       53   53     0         run   3.3554    200.00   20.000    31.58  5.18e-65  yes  0.0610
+
+optimiser : objective 2.562422054 nats, iters 2, converged True, start just-in-time
+            slave ledger error -6.939e-16 J, end level above floor 0 J, bursts at cap 14
+post-pass : objective 2.562422054 nats (change 0.0e+00), max |x change| 0.0e+00 J
+            slave ledger error 3.553e-15 J, end level above floor 0.5057 J, supercap in [0.433672, 0.63544] J (window [0.11374, 0.63544])
+calibration: 2 outer iteration(s), beta in [0.360774, 0.360774] (R x MPPT_EFF 0.95 x ETA_SC 0.95, 532 nm)
+            max |solver battery - physical battery| = 6.939e-17 J (optimiser), 1.110e-16 J (post-pass)
+  tx_cap_active_slots: 14
+  max_tx_cap_violation_J: 1.734723475976807e-18
+  unused_spill_J: 227621.68888161491
+  min_slave_level_margin_J: 0.0
+wrote 15 PNGs and slave_energy_profile.csv to out_integrated_demo
+wrote 13 THz-link PNGs to out_integrated_demo\thz_link

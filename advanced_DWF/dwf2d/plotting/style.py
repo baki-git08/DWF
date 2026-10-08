@@ -105,8 +105,13 @@ def _mark(ax, t, y, mask, label, marker, color, size=55):
 
 
 def _rates_bits(jp: JointParams, r: JointResult):
-    """Per-slot throughput of the master and slave links in bits: (tau/2) ln(1+gain*P) / ln 2."""
+    """Per-slot throughput of the master and slave links in bits: (tau/2) ln(1+gain*P) / ln 2.
+    With jp.slave_rate_window (burst of length T_k) the slave term is (T_k/2) ln(1 + hbar*tau*Pbar/T_k) / ln 2."""
     m = jp.master
+    if jp.slave_rate_window is not None:
+        T = jp.Twin
+        return (0.5 * m.tau * np.log1p(m.h * r.P) * BITS_PER_NAT,
+                0.5 * T * np.log1p(jp.h_bar * m.tau * r.Pbar / T) * BITS_PER_NAT)
     return (0.5 * m.tau * np.log1p(m.h * r.P) * BITS_PER_NAT,
             0.5 * m.tau * np.log1p(jp.h_bar * r.Pbar) * BITS_PER_NAT)
 

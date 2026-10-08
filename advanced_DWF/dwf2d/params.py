@@ -40,6 +40,18 @@ class JointParams:
         slave balance as  tau*Pbar_i = a_i*delta_i + Gt_{i-1} - Gt_i - c_i.  None (default) = 0.
     mppt_cap_J : S5, stored-energy cap per slot [J] (scalar or length N): a_k*delta_k <= capA_k
         (MPPT input rating).  None (default) = no cap.
+
+    Stage 6 (event-based slave; all None = off, the solver path is then unchanged):
+    tx_cap_J : S6, cap on the slave burst energy  xs(i) = tau*Pbar_i <= tx_cap_J[i]  [J] (photomixer at its 20 mW
+        radiated cap: P_PM_ELEC_W * t_tx).  None = inf.
+    tx_floor_J : S7, floor  xs(i) >= tx_floor_J[i]  in transmit slots [J] (e.g. a BER-margin minimum).  None = 0.
+        (The 1 mW radiated floor of an event is NOT this: it is enforced by refusing the event, physical.py.)
+    delta_cap_J : M5, cap on the energy the master sends  delta_k <= delta_cap_J[k]  [J] (laser optical power
+        cap).  None = inf.
+    slave_rate_window : T_i [s] (scalar or length N), the time over which the slave radiates its burst.  The
+        slave rate term becomes  th2 * (T_i/2) ln(1 + hbar_i * x_i / T_i)  (x_i = tau*Pbar_i); T_i = t_tx is a
+        burst, T_i = tau gives the stage-5 expression.  None = tau.
+    theta1 = 0 is the stage-6 master: it has no data link, so its "data energy" tau*P_i is unused / spill.
     """
     master: MasterParams
     alpha: np.ndarray | float = 0.368     # PLACEHOLDER  exp(-0.2 1/m * 5 m)
@@ -53,6 +65,24 @@ class JointParams:
     slave_schedule: np.ndarray | list | None = None   # 1 = slave may transmit, 0 = silent (None = always 1)
     slave_overhead_J: np.ndarray | float | None = None   # c_i: non-TX slave electronics energy per slot (None = 0)
     mppt_cap_J: np.ndarray | float | None = None         # S5: a_k*delta_k <= capA_k, stored energy per slot (None = inf)
+    tx_cap_J: np.ndarray | float | None = None           # S6: tau*Pbar_i <= tx_cap_J[i]  (None = inf)
+    tx_floor_J: np.ndarray | float | None = None         # S7: tau*Pbar_i >= tx_floor_J[i] in transmit slots (None = 0)
+    delta_cap_J: np.ndarray | float | None = None        # M5: delta_k <= delta_cap_J[k]  (None = inf)
+    slave_rate_window: np.ndarray | float | None = None  # T_i in (T_i/2) ln(1 + hbar*x_i/T_i)  (None = tau)
+
+    def _per_slot(self, name: str, lo: float, allow_inf: bool) -> None:
+        """Broadcast the optional per-slot field `name` to length N and check it (None stays None)."""
+        v = getattr(self, name)
+        if v is None:
+            return
+        n = self.master.N
+        arr = np.asarray(v, float)
+        if arr.ndim and arr.size != n:
+            raise ValueError(f"{name} needs 1 or N = {n} entries, got {arr.size}")
+        arr = np.broadcast_to(arr, (n,)).copy()
+        if np.any(np.isnan(arr)) or np.any(arr < lo) or (not allow_inf and not np.all(np.isfinite(arr))):
+            raise ValueError(f"{name} must be {'>' if lo > 0 else '>='} {lo:g}" + ("" if allow_inf else " and finite"))
+        setattr(self, name, arr)
 
     def __post_init__(self):
         """Broadcast scalars to one value per slot and validate the model assumptions."""
@@ -101,6 +131,21 @@ class JointParams:
             self.mppt_cap_J = np.broadcast_to(cp, (n,)).copy()
             if np.any(np.isnan(self.mppt_cap_J)) or np.any(self.mppt_cap_J < 0):
                 raise ValueError("mppt_cap_J must be >= 0 (use None or inf for no cap)")
+        # Stage 6 fields (None = off)
+        self._per_slot("tx_cap_J", 0.0, allow_inf=True)
+        self._per_slot("tx_floor_J", 0.0, allow_inf=False)
+        self._per_slot("delta_cap_J", 0.0, allow_inf=True)
+        if self.slave_rate_window is not None:
+            self._per_slot("slave_rate_window", 0.0, allow_inf=False)
+            if np.any(self.slave_rate_window <= 0):
+                raise ValueError("slave_rate_window must be > 0")
+        if self.tx_floor_J is not None:
+            if np.any(self.tx_floor_J[~self.slave_schedule] > 0):
+                raise ValueError("tx_floor_J > 0 in a silent slot (S4 forces Pbar = 0 there)")
+            if np.any(self.tx_floor_J > self.txcap):
+                raise ValueError("tx_floor_J exceeds tx_cap_J")
+        if self.theta1 < 0 or self.theta2 < 0:
+            raise ValueError("theta1 and theta2 must be >= 0")
 
     @property
     def a(self) -> np.ndarray:            # net gain of the down tap
@@ -119,6 +164,26 @@ class JointParams:
     def capA(self) -> np.ndarray:         # S5 cap, always an array
         """MPPT stored-energy cap per slot [J] (inf when no cap)."""
         return np.full(self.master.N, np.inf) if self.mppt_cap_J is None else self.mppt_cap_J
+
+    @property
+    def txcap(self) -> np.ndarray:        # S6 cap, always an array
+        """Cap on the slave burst energy tau*Pbar_i [J] (inf when off)."""
+        return np.full(self.master.N, np.inf) if self.tx_cap_J is None else self.tx_cap_J
+
+    @property
+    def txfloor(self) -> np.ndarray:      # S7 floor, always an array
+        """Floor on the slave burst energy tau*Pbar_i in transmit slots [J] (zeros when off)."""
+        return np.zeros(self.master.N) if self.tx_floor_J is None else self.tx_floor_J
+
+    @property
+    def dcap(self) -> np.ndarray:         # M5 cap, always an array
+        """Cap on the energy the master sends, delta_k [J] (inf when off)."""
+        return np.full(self.master.N, np.inf) if self.delta_cap_J is None else self.delta_cap_J
+
+    @property
+    def Twin(self) -> np.ndarray:         # slave rate window T_i, always an array
+        """T_i [s] of the slave rate term (T_i/2) ln(1 + hbar*x_i/T_i); tau when slave_rate_window is None."""
+        return np.full(self.master.N, float(self.master.tau)) if self.slave_rate_window is None else self.slave_rate_window
 
     @property
     def W(self) -> float:                 # usable battery window
@@ -140,8 +205,12 @@ class JointResult:
 
     Powers are in W, energies in J.  For the battery arrays, index n means "end of slot n"
     unless stated otherwise.
+
+    With theta1 = 0 (stage 6: the master has no data link) P is NOT data: tau*P_i is the master's
+    UNUSED / SPILL energy (harvest it neither shares nor carries), and rate_master is meaningless.
+    With slave_rate_window set, rate_slave = sum (T_i/2) ln(1 + hbar_i tau Pbar_i / T_i) (burst rate).
     """
-    P: np.ndarray             # master data power                    [W]     P_i = xm(i)/tau
+    P: np.ndarray             # master data power                    [W]     P_i = xm(i)/tau   (theta1 = 0: unused / spill)
     Pbar: np.ndarray          # slave  data power                    [W]     Pbar_i = xs(i)/tau
     delta: np.ndarray         # energy sent over the tap             [J]     delta_i
     F: np.ndarray             # master battery after slot n          [J]     F_n = sum_{i<=n}(E_i - tau*P_i - delta_i)

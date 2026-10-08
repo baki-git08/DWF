@@ -32,7 +32,11 @@ slave with a finite battery window, (4) slave **transmission schedule** (the sla
 some slots) and a **physical receive-chain calibration** of the down tap (photodiode/GaAs cell + MPPT).
 (5) the slave's **electronics load**: camera, MCU, external memory and MPPT become a known per-slot energy drain
 `c_i` plus an MPPT input cap (S5), driven by one editable file, `slave_config.py` (section 4, "Slave electronics
-load"). Stage 5 is the current state; it is off by default and `joint_dwf()` stays the single solver for all of it.
+load"). (6) **Integrated scenario** (`implementation.md`, section 4 "Stage 6"): the master only harvests and shares
+energy over UOWC (no data, `theta1 = 0`); the slave transmits only THz photomixer **bursts**, one per scheduled
+**event**, with a burst cap S6, a burst-aware rate, event refusal / rescheduling and a maximal-sharing tie-break;
+`python build_2D_dwf.py integrated_demo`. Stage 6 is the current state. Everything it adds is off by default (the
+legacy demos are bit-for-bit unchanged) and `joint_dwf()` stays the single solver.
 
 ---------------------------------------------------------------------------------------------
 
@@ -43,11 +47,14 @@ load"). Stage 5 is the current state; it is off by default and `joint_dwf()` sta
 | `build_dwf.py` | Stage 1: master-only DWF. `MasterParams`, `directional_water_filling`, `check_kkt`, `reference_solution` (scipy), `plot_result`. Holds `Harvested_energy_summer` and `Harvested_energy_winter` (60 samples, J per 1-minute slot). |
 | `build_2D_dwf.py` | Stages 3-4 entry point: the theory reading guide (module docstring), the `DEMO` switch and `python build_2D_dwf.py [legacy_demo \| physical_demo]`. The code itself lives in `dwf2d/`; this file re-exports every name it has always had, so `from build_2D_dwf import ...` keeps working unchanged. |
 | `dwf2d/` | Stages 3-4 implementation, one module per concern (see "Code layout" below): joint master + slave DWF, slave schedule (S4), physical-chain post-processing and calibration, verification, plots, demos. Imports `Harvested_energy_summer`/`Harvested_energy_winter` and `MasterParams` from `build_dwf.py`, `diagnose` from `dwf_diagnostics.py`, and `optical_to_electrical`, `OpticalReceiveChainResult` from `physical_chain.py`. |
-| `tests/` | Golden-master regression check: `python tests/regression.py check` (or `python -m pytest tests`) re-runs both demos and compares stdout, every result array (bit-for-bit), every PNG/CSV hash and the `build_2D_dwf` API against `tests/baseline/`. `python tests/regression.py capture` re-records the baseline. Do that only after an intended change in results. |
+| `tests/` | Golden-master regression check: `python tests/regression.py check` (or `python -m pytest tests`) re-runs the three demos and compares stdout, every result array (bit-for-bit), every PNG/CSV hash and the `build_2D_dwf` API against `tests/baseline/`. Changes that only ADD something switched off (a new dataclass field left at `None`, a new name, a trailing parameter with a default) are listed as `ADDITIVE`, not as differences. `python tests/regression.py capture [case]` re-records the baseline (one case only when named; never re-capture the legacy demos for stage-6 work). Stage-6 gates: `parity [n]` (joint_dwf vs cvxpy), `events [n]` (refusal loop vs brute force, post-pass), `stage6 [n]` (presets, invariants, scalability; slow). `test_regression.py` also holds fast checks of the stage-6 numbers. |
+| `Modulation_THz_slave_profile.ipynb` | THz modulation notebook (link budget, antenna gains, 4/8/16/64-QAM and PAM, Monte-Carlo BER) and the slave energy profile (section 13). A thin front end: the link and modulation code is imported from `dwf2d/channels.py`, the slave profile from `slave_load.py`. `LEGACY_GAINS = True` (5/5 dBi at both frequencies) reproduces the earlier saved outputs bit for bit. Runs in the Anaconda environment (pandas, IPython). |
+| `implementation.md` | The stage-6 spec. `STAGE6_REPORT.md` is the report of how it was built and verified. |
+| `out_integrated_demo/` | Output of `python build_2D_dwf.py integrated_demo`: the joint / physical / slave-load panels, `plot_event_bursts.png` and `slave_energy_profile.csv` (legacy columns, then `photomixer_J`, the per-event link columns and `master_stop`). `thz_link/` holds the notebook's 13 THz-link figures (BER vs SNR / distance / data rate / received power, link characteristics, constellations, eye diagrams, simulation vs theory, the five antenna-gain figures) at the `slave_config.py` link values, with the DWF operating point (preset, `D_THZ_M`, burst SNR at the 20 mW cap) marked in purple. |
 | `physical_chain.py` | Receive side of the optical energy link: optical power at the slave -> GaAs/Ge cell array (Spectrolab datasheet: Voc = 1.025 V, FF = 0.82, QE-derived responsivity at 450/532 nm) -> MPPT -> electrical power into the battery. `optical_to_electrical()`, `photodiode_stage()`, `mppt_stage()`, `size_array_by_intensity()`. Never modifies the solver. |
-| `dwf_diagnostics.py` | `diagnose(jp, r, load=None)`: human-readable report (sharing decision, energy ledger, active constraints, solver status). With `load` (from `slave_load.make_load`) it also prints the dummy-timing banner, the electronics energy per component, the MPPT-cap status, the window check and the supercap sizing. Called by the demo. |
-| `slave_config.py` | **The only file to edit** for the slave electronics: real datasheet powers, DUMMY durations per slot type (scalars or length-N arrays, `None` = rest of the slot), `TIMING_IS_DUMMY`, `ETA_TX`, `STORAGE_MARGIN`. Pure data. |
-| `slave_load.py` | (called `slave_load_profile.py` in the task text) Component model of the slave: `load_timing()` (validated `SlotTiming`), `overhead_profile()` (per-component energies and `c = camera + mcu + memory + mppt`, no TX), `attach_slave_load(jp, ...)`, `make_load(jp)`, `size_storage()`, `derive_dummy_timing()`, and the standalone illustration (`python slave_load.py`). Imported lazily by the demo; the solver module never imports it. |
+| `dwf_diagnostics.py` | `diagnose(jp, r, load=None)`: human-readable report (sharing decision, energy ledger, active constraints, solver status). With `load` (from `slave_load.make_load`) it also prints the dummy-timing banner, the electronics energy per component, the MPPT-cap status, the window check and the supercap sizing. Called by the demo. Stage 6: `diagnose_no_data()` (the report when `theta1 = 0`; `diagnose()` divides by `theta1`), `link_table()` / `link_report()` (per-event THz table). |
+| `slave_config.py` | **The only file to edit** for the slave electronics: real datasheet powers, DUMMY durations per slot type (scalars or length-N arrays, `None` = rest of the slot), `TIMING_IS_DUMMY`, `ETA_TX`, `STORAGE_MARGIN`. Stage 6 adds its own block (used only by the event model): `SLAVE_SCHEDULE`, `THZ_PRESET`, link and payload values, photomixer (`ETA_TX_PM` = 0.1, a different knob from the legacy `ETA_TX`), `PM_DC_MODE`, `MPPT_EFF`, `ETA_SC`, `SUPERCAP_F`, `EVENT_DURATIONS`, the `EVENT_COMPONENTS` table (a component = a row) and `DUMMY_VALUES` (banner). Pure data. |
+| `slave_load.py` | (called `slave_load_profile.py` in the task text) Component model of the slave: `load_timing()` (validated `SlotTiming`), `overhead_profile()` (per-component energies and `c = camera + mcu + memory + mppt`, no TX), `attach_slave_load(jp, ...)`, `make_load(jp)`, `size_storage()`, `derive_dummy_timing()`, and the standalone illustration (`python slave_load.py`). Imported lazily by the demo; the solver module never imports it. Stage 6: `event_profile()` (per-event load from the component table), `tx_time_s`, `tx_bounds_J` (`x_cap`, `x_min`), `thz_link()`, `supercap_window()`, `attach_event_load()` (= `attach_slave_load(..., model="event")`), `make_event_load()`, `reschedule()` (refusal queue), `SlaveState`, `dummy_banner()`. |
 | `Instructions_slave_load_integration.md` | The spec this stage was built from (section 4, "Slave electronics load", records where the code differed from it). |
 | `Instructions.md` | Design notes for replacing the linear slave-battery model with the physical chain: Option B (per-slot calibrated `beta`, **implemented**) and Option C (nonlinear tap inside the optimiser, **not implemented**). |
 | `PD cell/` | Datasheets (photodiodes, APD, STM32L010, ODD-5W) used for the receive-chain parameters. |
@@ -62,16 +69,17 @@ load"). Stage 5 is the current state; it is off by default and `joint_dwf()` sta
 
 | Module | Contents |
 |---|---|
-| `dwf2d/channels.py` | `beer_lambert`, the THz absorption table (`thz_freq`, `thz_alpha_cm`, `thz_alpha_m`), `thz_absorption`, `thz_gain` |
-| `dwf2d/params.py` | `JointParams`, `JointResult` |
-| `dwf2d/solver.py` | `joint_dwf`, its start points `_jit_start` / `_lp_start`, `InfeasibleSlaveBudget` |
-| `dwf2d/physical.py` | `PhysicalStorageResult`, `physical_stored_power`, `solve_with_physical_chain` |
-| `dwf2d/verification.py` | `check_kkt_joint`, `reference_solution_joint` (cvxpy) |
+| `dwf2d/channels.py` | `beer_lambert`, the THz absorption table (`thz_freq`, `thz_alpha_cm`, `thz_alpha_m`), `thz_absorption`, `thz_gain`; stage 6: the photomixer link budget moved from the notebook (`link_budget`, `fspl_db`, `absorption_db`, `near_field_limit_m`, `noise_floor_w`, `preset_gains`, `thz_hbar`), `uowc_alpha`, and the modulation engine (`gray_pam`, `gray_qam`, `qam_ber_theory`, `pam_ber_theory`, `make_scheme`, `qam_scheme`, `rrc_pulse`, `min_distance_decode`, `make_link_simulator`) |
+| `dwf2d/params.py` | `JointParams` (stage 6: `tx_cap_J` S6, `tx_floor_J` S7, `delta_cap_J` M5, `slave_rate_window`), `JointResult` |
+| `dwf2d/solver.py` | `joint_dwf` (stage 6: S6/S7/M5 bounds, rate window in `step()`, warm start `x0`), its start points `_jit_start` / `_lp_start`, `InfeasibleSlaveBudget` (`.slots`), `warm_start_from`; stage 6: `fullest_trajectory`, `maximal_sharing` (post-pass) |
+| `dwf2d/physical.py` | `PhysicalStorageResult`, `physical_stored_power` (`supercap_eff`), `solve_with_physical_chain` (`supercap_eff`, `solver_kw`); stage 6: `solve_with_refusals`, `RefusalResult` |
+| `dwf2d/verification.py` | `check_kkt_joint`, `reference_solution_joint` (cvxpy; stage 6: S6/S7/M5, burst rate); stage-6 gates: `parity_matrix`, `random_parity_case`, `small_event_problem`, `brute_force_events`, `max_level_lp`, `check_maximal_sharing`, `refusal_gate`, `stage6_checks` |
 | `dwf2d/plotting/style.py` | palette, `BITS_PER_NAT`, `EDGE_TOL`, shared helpers (`_new_axis`, `_new_axes`, `_finish`, `_legend`, `_mark`, `_shade_silent`, `_bound_masks`, `_rates_bits`) |
 | `dwf2d/plotting/joint.py` | panels of the joint solution (`plot_link_power` ... `plot_sharing_energy`) |
 | `dwf2d/plotting/physical.py` | `plot_physical_stored_power`, `plot_physical_slave_battery`, `energy_loss_breakdown`, `plot_loss_histogram` |
-| `dwf2d/plotting/slave_panels.py` | slave-load panels, `slave_load_components`, `write_slave_energy_csv` |
-| `dwf2d/demos.py` | `_demo_problem`, `_run_demo`, `legacy_demo`, `physical_demo` |
+| `dwf2d/plotting/slave_panels.py` | slave-load panels, `slave_load_components`, `write_slave_energy_csv`; stage 6: `plot_event_bursts` |
+| `dwf2d/plotting/thz_link.py` | the 13 THz-link figures of the notebook (sections 7-12; the notebook is only the reference and is not changed), drawn by `integrated_demo`: `ThzLinkSetup` (the notebook configuration), `setup_from_slave_config` (slave_config link values + the DWF operating point), one `plot_*` per figure (returns the figure), `simulate_demo` / `simulate_validation` (Monte-Carlo), `write_thz_link_plots` |
+| `dwf2d/demos.py` | `_demo_problem`, `_run_demo`, `legacy_demo`, `physical_demo`; stage 6: `_integrated_problem`, `integrated_demo` |
 
 Dependencies only point "down" this table (`params` ← `solver` ← `physical` ← plots ← `demos`), so there are no import
 cycles. Where new code goes:
@@ -84,7 +92,7 @@ Dependencies: `numpy`, `matplotlib` (plots), plus the local modules above. `cvxp
 `scipy` is used by the stage-1 `reference_solution()` and, only when a slave load is attached and the just-in-time
 start breaks a bound, by the LP start fallback (`scipy.optimize.linprog`).
 
-Run the demo: `cd advanced_DWF && python build_2D_dwf.py` (= `legacy_demo`: prints the `diagnose()` report, the KKT and calibration summaries, and writes the nine `plot_*.png` files above). `python build_2D_dwf.py physical_demo` runs the same problem with the slave electronics attached (see section 7); the choice is also the `DEMO` constant in `build_2D_dwf.py`.
+Run the demo: `cd advanced_DWF && python build_2D_dwf.py` (= `legacy_demo`: prints the `diagnose()` report, the KKT and calibration summaries, and writes the nine `plot_*.png` files above). `python build_2D_dwf.py physical_demo` runs the same problem with the slave electronics attached (see section 7); `python build_2D_dwf.py integrated_demo` runs the stage-6 scenario into `out_integrated_demo/`; the choice is also the `DEMO` constant in `build_2D_dwf.py` (currently `physical_demo`).
 
 ---------------------------------------------------------------------------------------------
 
@@ -129,7 +137,15 @@ S2  b_{n-1} + a_n*delta_n <= B_max         slave ceiling, at ARRIVAL   [mu_bar_{
 S3  Pbar_i >= 0                                                        [eta_bar_i]
 S4  Pbar_i = 0 in every slot with schedule s_i = 0     (JointParams.slave_schedule)
 S5  a_k*delta_k <= capA_k                  MPPT input rating, stored energy per slot (JointParams.mppt_cap_J; inf = off)
+S6  tau*Pbar_i <= X_i                      burst cap (photomixer at 20 mW radiated)  (JointParams.tx_cap_J; stage 6)
+S7  tau*Pbar_i >= Lf_i  (transmit slots)   burst floor, optional                     (JointParams.tx_floor_J; stage 6)
+M5  delta_k <= Dc_k                        laser cap                                 (JointParams.delta_cap_J; stage 6)
 ```
+
+Stage 6 also changes the slave rate term when `JointParams.slave_rate_window` (`T_i`) is set: the slave radiates
+`x_i = tau*Pbar_i` as a burst of length `T_i` (= `t_tx`), so its term is `th2*(T_i/2) ln(1 + hbar_i x_i/T_i)` (with
+`T_i = tau` it is the expression above). With `theta1 = 0` the master has no data: `tau*P_i` is its unused / spill
+energy. See section 4, "Stage 6".
 
 **S4 (slave schedule).** `s_i in {0,1}`; a shorter pattern repeats cyclically (`[1,0]` = every other
 slot). A silent slot (`s_i = 0`) still *receives* `delta_i` and stores it; it is a pure pass-through for
@@ -429,6 +445,41 @@ to the config (needed for the TX-window warning and the standalone placeholder);
 silent slots can still receive `delta` and the master can feed the slave just in time (checked against cvxpy): only
 `W < c_k` for a single slot does.
 
+### Stage 6: integrated scenario (`integrated_demo`; spec `implementation.md`, report `STAGE6_REPORT.md`)
+
+Off by default: with none of the new fields set the solver runs the legacy arithmetic exactly (every new term sits
+behind a Python `if`), and `tests/regression.py check` stays IDENTICAL for `legacy_demo` and `physical_demo`.
+
+* **Roles.** Master: harvest + UOWC energy sharing only, `theta1 = 0` (`tau*P` is unused / spill; `h = 1` is a
+  placeholder that only meets weight 0). Slave: PV -> MPPT -> supercap, transmits only THz photomixer bursts to a third-party
+  receiver. `SLAVE_SCHEDULE` releases at most one **event** per slot (camera 0.5 s, PSRAM write + read 10.5 ms each, MCU
+  527.3 ms, a 16.777 ms burst); PV/MPPT charge in every slot.
+* **Link.** `thz_hbar`: `coupling = FSPL + absorption - G_tx - G_rx`, `hbar = ETA_TX_PM / (10^(coupling/10) N)`,
+  `N = k_B T F R_s` = 4.0039e-11 W; Friis only for `d >= d_nf = lambda/(4 pi) 10^((G_tx+G_rx)/20)` (clamped with a
+  warning). `THZ_PRESET` "0.3THz" (10/10 dBi): `hbar` = 7199 1/W at 1 mm; "0.1THz" (5/5 dBi): 6479 1/W. `hbar` already
+  contains `ETA_TX_PM`, so it is applied once.
+* **Load.** `event_profile`: event slot `c_i = sum [P_a t_a + P_s (tau - t_a)]` (photomixer active term excluded) =
+  198.41 mJ, sleep slot `sum P_s tau` = 15.962 mJ (PSRAM standby; 3.218 mJ in deep power-down).
+* **Burst (S6, rate window).** `x_i = tau*Pbar_i` is the electrical burst energy, `x_i <= x_cap = P_PM_ELEC_W t_tx` =
+  3.3554 mJ in event slots and 0 elsewhere (`tx_cap_J`); the rate is `th2 (t_tx/2) ln(1 + hbar x_i/t_tx)`.
+  `step()` balance: `th_u h_u (1 + h_w x_w/T_w) = r th_w h_w (1 + h_u x_u/T_u)`, still linear in `t`.
+  S6 / S7 / M5 enter moves 1-5, 7, 9, `apply()` (and so polish families B, C, D, move 10) as one more bound each:
+  S6 `xs(j) <= X_j` (multiplier `kappa_j`), S7 `xs(j) >= Lf_j` (`iota_j`), M5 `d[k] <= Dc_k` (`rho'_k`); the slave
+  stationarity becomes `s_j - kappa_j + iota_j = Lambda_bar_j`. `check_kkt_joint` skips the delta test where S6 or M5
+  binds and uses an absolute gap when `theta1 = 0`.
+* **beta.** `beta_i = R x MPPT_EFF x ETA_SC`: `physical_stored_power(..., supercap_eff=ETA_SC)`; the calibration loop is
+  unchanged (0.379762 at `ETA_SC = 1`, x 0.95 exactly with `ETA_SC = 0.95`).
+* **Refusal** (`solve_with_refusals`). An event with `x_i < x_min` (1 mW radiated, 0.16777 mJ; `x_i = 0` included) is
+  refused: its slot returns to sleep load and the event moves to the first later slot without its own event, at most
+  `MAX_DELAY_SLOTS` after its release, else it is dropped. An unaffordable event load (or `fixed_bias`) raises
+  `InfeasibleSlaveBudget`; the loop then refuses the event at or before the first slot where even the fullest supercap
+  trajectory falls below `B_min`. Pass cap `#events (MAX_DELAY_SLOTS + 1) + 1`. Greedy, not a combinatorial optimum.
+* **Maximal sharing** (`maximal_sharing`, post-pass, `theta1 = 0` only): with every `x_i` fixed, the master sends in
+  each slot as much as the ceiling `B_max`, S5, M5 and its own energy allow. Objective, `x` and events are unchanged;
+  the supercap ends above `B_min` and every slot is stopped by exactly one of those bounds (`delta = 0` when full).
+* **fixed_bias** (`PM_DC_MODE`): every event costs `P_PM_ELEC_W t_tx` inside `c_i`, `x = 0` for the solver; the link
+  report credits the constant `(t_tx/2) ln(1 + hbar P_PM_ELEC_W)` per run event.
+
 ---------------------------------------------------------------------------------------------
 
 ## 5. Stage 1 (master only, `build_dwf.py`) in brief
@@ -465,6 +516,11 @@ The demo uses these; replace them when real values exist.
 | Datasheet powers (camera 0.30/10 uW, MCU 60 mW/16 uW, memory 80 mW/0.2 mW, MPPT 0.96/1.44 uW, input 3.3 V x 100 mA, eff 0.95, 2.2-5.2 V) | stated powers (not V x I) | real (`datasheet_check()` reports the V x I mismatches) |
 | Receive chain | GaAs/Ge cell (Spectrolab datasheet), FF 0.82, Voc 1.025 V constant, array sized by intensity | datasheet numbers; Voc fall-off at low illumination is NOT modelled (see `physical_chain.py` docstring) |
 | Arrival timing | energy sent in slot k is usable by the slave in slot k | ASSUMPTION (as in Gurakan; acoustic/optical delay negligible vs 60 s) |
+| Stage 6: `ETA_SC` (0.95), `ETA_LD` (1.0), `LASER_P_OPT_MAX_W` (None = M5 off), `MAX_DELAY_SLOTS` (5), `D_UOWC_M` (1 mm) | | **DUMMY / PLACEHOLDER** (`slave_config.DUMMY_VALUES`, banner on every event-model run) |
+| Stage 6: event powers and durations, photomixer (20 mW / 200 mW / 1 mW floor), 16-QAM 8 MiB, `R_s`, noise (290 K, NF 10 dB), `ALPHA_THZ`, presets, `D_THZ_M` = 1 mm, 0.047 F supercap, `MPPT_EFF` | | given by the user / the notebook (real); the receiver noise figure and bandwidth are notebook defaults, not the UWDrone receiver's |
+| Stage 6: master `h = 1` | | PLACEHOLDER, inert with `theta1 = 0` |
+| Stage 6: `b0` | `B_min` (supercap starts at 2.2 V) | ASSUMPTION |
+| Stage 6: beta calibration wavelength | 532 nm (`PV_CAL_WAVELENGTH_NM`, same as the legacy demos; the UOWC attenuation is the 450 nm value) | ASSUMPTION |
 
 The sharing test is `R = a*(th2/th1)*(hbar/h)*(1+h*P0)`. With `th2/th1 = 3` and `h0 = 10` it is about 2.75
 (> 1), so sharing pays in the current demo, unlike the earlier `th2 = th1`, `h0 = 1` demo where `R < 1` forced
@@ -474,6 +530,20 @@ not present demo numbers as results about a real system.
 ---------------------------------------------------------------------------------------------
 
 ## 7. Current results (demo: winter array, schedule, calibrated beta)
+
+> **Numbers at the current code (2026-10-08).** The baseline in `tests/baseline/` was re-captured from HEAD on
+> 2026-10-08: the committed `_demo_problem` uses the 7-event schedule, `beta` 0.9 start, `B_min` 200 J, `B_max` 1500 J.
+> `legacy_demo`: objective **1781.9933** (master 1303.2194, slave 159.5913), 505 iterations, calibration 4 outer
+> iterations, `beta` in [0.3798, 0.9000], solver vs physical battery 5.3e-12 J. `physical_demo`: objective 1537.8144,
+> 1633 iterations, W = 2.442 J, sum c = 2.735 J. The paragraphs below are the earlier (stage-4/5) runs and keep their
+> numbers as history.
+>
+> **`integrated_demo` (stage 6).** 60 slots, 14 events, preset 0.3THz at 1 mm, 0.047 F supercap: all 14 events run in
+> their release slot at `x_cap` = 3.3554 mJ (20 mW radiated, SNR 31.58 dB, 16-QAM BER 5e-65), 0.0610 nats each,
+> objective 2.562422 nats (= 14 x 0.0610 x theta2 3), equal to cvxpy; 0 refusals; `beta` = 0.360774; master sends
+> 11.27 J of 227,633 J (0.005%), the rest is spill; after the post-pass the supercap is refilled to `B_max` in every slot
+> (stopped by the ceiling in all 60) and ends 0.506 J above the floor; solver vs physical battery 1e-16 J. Preset 0.1THz:
+> `hbar` 6479 1/W, objective 2.525328; `fixed_bias`: same events, constant 0.8541 nats credited.
 
 `iters = 1410`, converged, objective **1902.8194 nats** (master 1141.7442, slave 253.6917; objective =
 th1*master + th2*slave). Master data power 41.58 W mean (min 40.91), slave data power 8.22 W mean (zero in
@@ -557,6 +627,28 @@ tie-breaker is added.
   about 4e-12 J (section 7).
 * Comment-only edits were verified by comparing the AST with docstrings stripped and re-running the demo (done for the stage-3 code; redo
   it against the current outputs, see section 10).
+* **Stage 6** (details and numbers in `STAGE6_REPORT.md`):
+  * *Legacy unchanged*: `tests/regression.py check` IDENTICAL for `legacy_demo` and `physical_demo` after every phase
+    (arrays bit-for-bit, stdout, PNG/CSV hashes); the only differences are additive (new fields at `None`, new names,
+    trailing parameters with defaults).
+  * *Notebook*: with `LEGACY_GAINS = True` all 91 compared arrays (tables, BER theory, seeded `simulate_link`) equal the
+    original notebook **bit for bit** (tolerance 0).
+  * *Numbers*: event slot 198.412 mJ, sleep slot 15.962 mJ (dpd 3.218 mJ), sum c = 1.7560 J per 30 slots, `t_tx`
+    16.777216 ms, `x_cap` 3.3554 mJ, `x_min` 0.16777 mJ, N 4.0039e-11 W, `hbar` 7199 / 6479 1/W, 0.0610 nats per event.
+  * *cvxpy parity* (`regression.py parity`, 25 random cases x 9 families): **0 above the optimum**; `integrated_like`
+    (theta1 = 0, events, c, S6, burst rate) 25/25 exact; the other families 0-20 exact with gaps 1e-6..1e-1. The gaps
+    are the pre-existing stall (HEAD gives bit-identical objectives on the same cases), mostly in a regime where the
+    master gives everything (`P = 0` everywhere) and the optimum re-routes `delta` between down taps through the master
+    carry, a path no move covers.
+  * *Refusal loop* (`regression.py events`, 20 cases x 6 kinds, N = 7-10): all converge; brute force over every
+    placement matches 97/100 (gaps: 1 placement with +0.0129 nats, 2 fixed_bias cases with one more event); bookkeeping,
+    delays and `x >= x_min` hold; post-pass: objective and every `x` unchanged (0), every slot stopped by one bound,
+    `delta = 0` in full slots, level inside the window, an LP (maximise sum b with x fixed) agrees to 2e-15 J.
+  * *Stage-6 checks* (`regression.py stage6`): the preset switch changes only `h_bar`; ledgers close to 2.4e-16 J,
+    `Pbar` in sleep slots and `x - x_cap` <= 3.2e-16 J; objective per period identical for N = 60 and 600. One
+    monotonicity failure: a bigger supercap (0.1 F) LOWERED the objective of a scarce case from 0.549 to 0.183 because
+    joint_dwf stalled (cvxpy: 0.549 both); on 32 scarce feasible cases joint_dwf is exact in 29 and 33% below in 3 (one
+    event left at x = 0), all from the LP-fallback start. See open item 18.
 
 ---------------------------------------------------------------------------------------------
 
@@ -645,17 +737,37 @@ assert r.converged and abs(ref - r.objective) < 1e-5 * abs(ref)
 10. Calibrate `h0` in `thz_gain` (or replace pure absorption with a full THz path-loss model:
     spreading loss + molecular absorption + antenna/beam gains). `h0 = 10` and `theta2 = 3` currently make
     sharing profitable; until `h0` is real, the THz/optical demo numbers (section 6) show the link model
-    wired in correctly, not a realistic operating point.
+    wired in correctly, not a realistic operating point. **Stage 6: done for the integrated scenario**: `thz_hbar`
+    is the full budget (FSPL + absorption - antenna gains, thermal noise, near-field clamp). The legacy demos keep
+    `thz_gain` and `h0 = 10` on purpose (bit-for-bit baselines).
 11. Verify S4 and move 10 against `reference_solution_joint` over many random schedules (all ON, a single ON
     slot, leading/trailing silent runs, per-slot `beta`), reporting failure rates as in section 10.
 12. Implement Option C of `Instructions.md` (nonlinear photodiode/MPPT tap inside the optimiser) if the
     secant-gain calibration proves inadequate; add Voc fall-off at low illumination to `physical_chain.py`.
 14. Replace the DUMMY durations in `slave_config.py` with measured values (set `TIMING_IS_DUMMY = False`), and the TX stage
     (`ETA_TX`, TX window, image size, memory/link rates) with the real hardware; decide whether captures move into silent
-    slots and model the memory holding an image across slots.
+    slots and model the memory holding an image across slots. **Stage 6**: the event model now uses the real event
+    timing (camera, PSRAM, MCU, 8 MiB 16-QAM burst); still DUMMY there: `ETA_SC`, `ETA_LD`, `LASER_P_OPT_MAX_W`,
+    `MAX_DELAY_SLOTS`, `D_UOWC_M` (`slave_config.DUMMY_VALUES`). The stage-5 slot model keeps its DUMMY durations.
 15. If the remaining random gaps matter, extend the cross-run move (master end node through dead master slots) in a form that
     does not blow up the polish cost; report the gap rate before and after as in section 10.
-16. Slave supercap leakage, and a rerun of `physical_demo` with the real `h0`/`theta2`.
+16. Slave supercap leakage, and a rerun of `physical_demo` with the real `h0`/`theta2`. **Stage 6**: leakage, an image held
+    across slots and the receiver's real noise figure / bandwidth are still not modelled; the supercap storage loss is in
+    `beta` (`ETA_SC`).
+17. **Missing move: master-carry delta shift** (`d[i] -= t, f[i+1..k] += t, d[k] += t`: re-time sharing between two down
+    taps through the master carry, slave ends `xs(i)`, `xs(k)`). Its absence explains most below-optimum cases of the
+    stage-6 parity matrix (the "master gives everything" regime). Not added: the spec forbids ad-hoc moves without a decision.
+18. **Stage-6 stall with scarce master energy.** When the master's harvest is the binding resource (fractions of a joule
+    per slot) joint_dwf can stop with an event at `x = 0` (33% below cvxpy in 3 of 32 cases; a 3-tap re-route is needed).
+    The refusal loop then refuses an event the optimum could run. The integrated demo is not affected (kJ of master
+    energy, exact against cvxpy). Options to decide: a cvxpy check of every refusal, a new multi-tap move, or a better
+    start than the LP fallback for `theta1 = 0`.
+19. **Speed.** polish family D costs O(N^2) `apply()` calls of O(N) length, i.e. O(N^3): joint_dwf on the integrated
+    problem takes 0.28 s at N = 60, 28 s at N = 240, 216 s at N = 600; N = 6000 would be about 80 h (not run). The O(N)
+    parts (event load, queue, post-pass, link table) take 1-22 ms at N = 6000. Deferred: vectorised sweeps or
+    rolling-horizon blocks.
+20. The refusal pass cap is `#events (MAX_DELAY_SLOTS + 1) + 1` (the spec's `#events MAX_DELAY_SLOTS + 1` is one
+    refusal per event short of the worst case).
 13. The schedule is a fixed input. Choosing which slots the slave transmits in would be a combinatorial
     extension and is not attempted.
 

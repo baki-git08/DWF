@@ -52,13 +52,16 @@ def plot_transmit_power(jp: JointParams, r: JointResult, path: str, title: str =
 
     axm.step(t, nu_m, where="mid", color=INK2, lw=1.4, ls="--",
              label="water level ν_k = P_k + 1/h_k (staircase)")
-    axm.plot(t, r.P, color=C_MASTER, lw=2, label="master data transmit power P_k")
+    nd = jp.theta1 == 0                     # stage 6: the master has no data link, tau*P_k is unused / spill
+    axm.plot(t, r.P, color=C_MASTER, lw=2,
+             label="master unused / spill power P_k (no master data, theta1 = 0)" if nd else "master data transmit power P_k")
     axm.plot(t, 1.0 / m.h, color=GRID, lw=1.2, ls=":", label="floor 1/h_k (level needed before any power flows)")
     _mark(axm, t, nu_m, r.P <= 1e-9, "P_k = 0: level below floor (non-negativity binds)", "x", INK)
     _mark(axm, t, nu_m, m_empty, "master battery empty, F_k = 0 (causality binds)", "v", C_MASTER)
     _mark(axm, t, nu_m, m_full, "master battery full, F_k = cap (overflow binds)", "^", C_LINK)
     axm.set_ylabel("master power [W]")
-    axm.set_title("Master: data power P_k vs water level", loc="left", color=INK2, fontsize=10)
+    axm.set_title("Master: unused / spill power P_k (no data link)" if nd else "Master: data power P_k vs water level",
+                  loc="left", color=INK2, fontsize=10)
     axm.set_ylim(bottom=0)
     _legend(axm, "upper left")
 
@@ -127,8 +130,11 @@ def plot_cumulative_energy(jp: JointParams, r: JointResult, path: str, title: st
 
     fig, (axm, axs) = _new_axes(2)
     axm.plot(t, arr_m, color=INK2, lw=2, label="cumulative harvested, Σ E_i")
-    axm.plot(t, use_m, color=C_MASTER, lw=2, label="cumulative consumed, Σ (τ P_i + δ_i)  [own data + shared]")
-    axm.plot(t, np.cumsum(tau * r.P), color=C_MASTER, lw=1.2, ls="--", label="of which own data only, Σ τ P_i")
+    nd = jp.theta1 == 0                     # stage 6: tau*P_i is unused / spill, not data
+    axm.plot(t, use_m, color=C_MASTER, lw=2, label="cumulative used, Σ (τ P_i + δ_i)  [unused / spill + shared]" if nd
+             else "cumulative consumed, Σ (τ P_i + δ_i)  [own data + shared]")
+    axm.plot(t, np.cumsum(tau * r.P), color=C_MASTER, lw=1.2, ls="--",
+             label="of which unused / spill, Σ τ P_i" if nd else "of which own data only, Σ τ P_i")
     axm.fill_between(t, use_m, arr_m, color=C_MASTER, alpha=0.12, lw=0,
                      label="gap = energy stored in master battery, F_k")
     _mark(axm, t, use_m, m_empty, "curves touch: battery empty (causality binds)", "o", INK)
@@ -160,8 +166,12 @@ def plot_throughput_per_slot(jp: JointParams, r: JointResult, path: str, title: 
     rate_m, rate_s = _rates_bits(jp, r)
     fig, ax = _new_axis()
     _shade_silent(ax, jp)
-    ax.plot(t, rate_m, color=C_MASTER, lw=2, label="master → receiver, (τ/2) log₂(1 + h_k P_k)")
-    ax.plot(t, rate_s, color=C_SLAVE, lw=2, label="slave → master, (τ/2) log₂(1 + h̄_k P̄_k)")
+    if jp.theta1 == 0:                      # stage 6: master has no data; slave bursts to a third-party receiver
+        ax.plot(t, rate_s, color=C_SLAVE, lw=2, label="slave → receiver (THz burst), (T_k/2) log₂(1 + h̄_k τP̄_k / T_k)"
+                if jp.slave_rate_window is not None else "slave → receiver, (τ/2) log₂(1 + h̄_k P̄_k)")
+    else:
+        ax.plot(t, rate_m, color=C_MASTER, lw=2, label="master → receiver, (τ/2) log₂(1 + h_k P_k)")
+        ax.plot(t, rate_s, color=C_SLAVE, lw=2, label="slave → master, (τ/2) log₂(1 + h̄_k P̄_k)")
     ax.set_ylabel("data delivered in the slot [bits]")
     ax.set_ylim(bottom=0)
     _legend(ax)
@@ -173,8 +183,9 @@ def plot_throughput_cumulative(jp: JointParams, r: JointResult, path: str, title
     t = np.arange(jp.master.N)
     rate_m, rate_s = _rates_bits(jp, r)
     fig, ax = _new_axis()
-    ax.plot(t, np.cumsum(rate_m), color=C_MASTER, lw=2,
-            label=f"master, total after last slot = {r.rate_master * BITS_PER_NAT:.1f} bits")
+    if jp.theta1 != 0:                      # stage 6 (theta1 = 0): no master data, no master curve
+        ax.plot(t, np.cumsum(rate_m), color=C_MASTER, lw=2,
+                label=f"master, total after last slot = {r.rate_master * BITS_PER_NAT:.1f} bits")
     ax.plot(t, np.cumsum(rate_s), color=C_SLAVE, lw=2,
             label=f"slave, total after last slot = {r.rate_slave * BITS_PER_NAT:.1f} bits")
     ax.set_ylabel("cumulative data delivered up to slot k [bits]")
@@ -242,7 +253,8 @@ def plot_sharing_energy(jp: JointParams, r: JointResult, path: str, title: str =
 
     fig, (axm, axs) = _new_axes(2)
     axm.bar(t, m.E, color=INK2, width=0.8, label="IN: harvested, E_k")
-    axm.bar(t, -tau * r.P, color=C_MASTER, width=0.8, label="OUT: own data, τ P_k")
+    axm.bar(t, -tau * r.P, color=C_MASTER, width=0.8,
+            label="OUT: unused / spill, τ P_k" if jp.theta1 == 0 else "OUT: own data, τ P_k")
     axm.bar(t, -r.delta, bottom=-tau * r.P, color=C_LINK, width=0.8,
             label="OUT: sent to slave, δ_k")
     axm.axhline(0, color=INK2, lw=0.8)

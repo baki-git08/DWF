@@ -7,7 +7,7 @@ import numpy as np
 from build_dwf import Harvested_energy_winter, MasterParams
 from dwf_diagnostics import diagnose
 
-from .channels import beer_lambert, thz_gain
+from .channels import beer_lambert, thz_gain, uowc_alpha
 from .params import JointParams
 from .physical import solve_with_physical_chain
 from .verification import check_kkt_joint
@@ -17,9 +17,10 @@ from .plotting.joint import (
 )
 from .plotting.physical import plot_loss_histogram, plot_physical_slave_battery, plot_physical_stored_power
 from .plotting.slave_panels import (
-    plot_slave_battery_window, plot_slave_cumulative_energy, plot_slave_energy_breakdown,
+    plot_event_bursts, plot_slave_battery_window, plot_slave_cumulative_energy, plot_slave_energy_breakdown,
     plot_slave_load_per_slot, write_slave_energy_csv,
 )
+from .plotting.thz_link import setup_from_slave_config, write_thz_link_plots
 
 
 # ----------------------------------------------------------------------------
@@ -29,6 +30,8 @@ from .plotting.slave_panels import (
 #                   The result is at DUMMY durations and placeholder h0 / theta2; it differs from legacy_demo
 #                   by orders of magnitude in slave data energy (the real electronics cannot absorb the
 #                   legacy stage-4 flows).  That is expected, not a solver bug: inputs are NOT retuned.
+#   integrated_demo : stage 6 (slave_config.py STAGE 6 block): master shares over UOWC only (theta1 = 0), event-based
+#                   slave with THz bursts, refusal / rescheduling loop and maximal-sharing post-pass.
 # ----------------------------------------------------------------------------
 
 
@@ -108,6 +111,117 @@ def _run_demo(jp0: JointParams, outdir: str = ".", load: dict | None = None):
 def legacy_demo():
     """No slave load: reproduces the README stage-4 numbers."""
     return _run_demo(_demo_problem())
+
+
+def _integrated_problem(preset: str | None = None, n_periods: int = 1):
+    """Stage-6 problem: winter harvest, master with NO data link (theta1 = 0), UOWC energy link, event-based slave
+    (slave_config.py STAGE 6 block).  Returns (jp0, build, link): build(effective) attaches the event load.
+    n_periods repeats the 60-slot harvest (and the cyclic schedule) to N = 60 * n_periods (scalability runs)."""
+    import dataclasses
+    import slave_config as cfg
+    import slave_load
+    # h = 1.0 is a PLACEHOLDER: with theta1 = 0 the master has no data, so h only appears in step() with weight 0.
+    master = MasterParams(E=np.tile(Harvested_energy_winter, int(n_periods)), E_max=np.inf, tau=60.0, h=1.0)
+    jp0 = JointParams(master=master, alpha=uowc_alpha(cfg.D_UOWC_M, cfg.UOWC_C_PER_M, cfg.ETA_LD), beta=0.4,
+                      theta1=0.0, slave_schedule=cfg.SLAVE_SCHEDULE)
+    link = slave_load.thz_link(preset)
+
+    def build(effective):
+        return slave_load.attach_event_load(dataclasses.replace(jp0, slave_schedule=np.asarray(effective, int)), link=link)
+    return jp0, build, link
+
+
+def integrated_demo(outdir: str = "out_integrated_demo", preset: str | None = None):
+    """Stage 6: the master only harvests and shares over UOWC; the slave sends one THz burst per event.
+
+    refusal loop (physical.solve_with_refusals) around the calibrated solve (beta = R x MPPT_EFF x ETA_SC),
+    then the maximal-sharing post-pass (MAXIMAL_SHARING), the THz link report and the plots / CSV in outdir.
+    Inputs are NOT tuned: winter harvest, THZ_PRESET, D_THZ_M = 1 mm, 0.047 F supercap, DUMMY values flagged."""
+    import os
+    import slave_config as cfg
+    import slave_load
+    from dwf_diagnostics import diagnose_no_data, link_report, link_table
+    from .physical import physical_stored_power, solve_with_refusals
+    from .solver import maximal_sharing
+    os.makedirs(outdir, exist_ok=True)
+    out = lambda name: os.path.join(outdir, name)
+    banner = slave_load.dummy_banner()
+    if banner:
+        print(banner)
+    jp0, build, link = _integrated_problem(preset)
+    tb = slave_load.tx_bounds_J()
+    calib = dict(wavelength_nm=cfg.PV_CAL_WAVELENGTH_NM, mppt_efficiency=cfg.MPPT_EFF, supercap_eff=cfg.ETA_SC)
+    #   tol: joint_dwf stops at tol * mean(E) (kJ per slot); the bursts are mJ, so the default 1e-10 would stop at
+    #   ~4e-7 J.  1e-15 puts the stop near 4e-12 J (the solver itself is unchanged).
+    rr = solve_with_refusals(build, jp0.slave_schedule, tb["x_min"], cfg.MAX_DELAY_SLOTS, mode=cfg.PM_DC_MODE,
+                             calib_kw=calib, solver_kw=dict(tol=1e-15))
+    print(f"integrated_demo: {jp0.master.N} slots, {int(np.sum(jp0.slave_schedule))} events released, "
+          f"preset {link['preset']}, refusal loop {rr.passes} pass(es), converged {rr.converged}")
+    if not rr.converged or rr.r is None:
+        print("integrated_demo: the refusal loop did not converge; no consistent schedule to report")
+        for h in rr.history:
+            print(f"  {h}")
+        return rr.jp, rr.r, rr.ph
+    jp, r, ph = rr.jp, rr.r, rr.ph
+    k_opt = check_kkt_joint(jp, r)
+    stop = None
+    r_rep, ph_rep = r, ph
+    if cfg.MAXIMAL_SHARING:
+        r2, info = maximal_sharing(jp, r)
+        if info["applied"]:
+            stop = info["stop"]
+            r_rep = r2
+            ph_rep = physical_stored_power(jp, r2, cfg.PV_CAL_WAVELENGTH_NM, cfg.MPPT_EFF, supercap_eff=cfg.ETA_SC)
+        else:
+            print(f"maximal-sharing post-pass NOT applied: {info['reason']}")
+    load = slave_load.make_event_load(jp)
+    rows = link_table(jp, r_rep, rr.events, link, tb["t_tx"], tb["x_min"], tb["x_cap"], cfg.BER_TARGET, cfg.MODULATION,
+                      cfg.PM_DC_MODE)
+    diagnose_no_data(jp, r_rep, stop=stop, profile=load)
+    link_report(jp, rr, link, rows, load, load["sizing"], cfg.BER_TARGET)
+    k_rep = check_kkt_joint(jp, r_rep)
+    print(f"optimiser : objective {r.objective:.9f} nats, iters {r.iters}, converged {r.converged}, start {r.start}")
+    print(f"            slave ledger error {k_opt['slave_ledger_error_J']:.3e} J, end level above floor "
+          f"{r.b[-1] - jp.B_min:.4g} J, bursts at cap {k_opt.get('tx_cap_active_slots', 0)}")
+    if stop is not None:
+        print(f"post-pass : objective {r_rep.objective:.9f} nats (change {abs(r_rep.objective - r.objective):.1e}), "
+              f"max |x change| {np.max(np.abs(jp.master.tau * (r_rep.Pbar - r.Pbar))):.1e} J")
+        print(f"            slave ledger error {k_rep['slave_ledger_error_J']:.3e} J, end level above floor "
+              f"{r_rep.b[-1] - jp.B_min:.4g} J, supercap in [{r_rep.b.min():.6g}, {r_rep.b_peak.max():.6g}] J "
+              f"(window [{jp.B_min:.6g}, {jp.B_max:.6g}])")
+    print(f"calibration: {rr.n_outer} outer iteration(s), beta in [{jp.beta.min():.6f}, {jp.beta.max():.6f}] "
+          f"(R x MPPT_EFF {cfg.MPPT_EFF:g} x ETA_SC {cfg.ETA_SC:g}, {cfg.PV_CAL_WAVELENGTH_NM} nm)")
+    print(f"            max |solver battery - physical battery| = {np.max(np.abs(r.b - ph.b_phys)):.3e} J (optimiser)"
+          + (f", {np.max(np.abs(r_rep.b - ph_rep.b_phys)):.3e} J (post-pass)" if stop is not None else ""))
+    for key in ("tx_cap_active_slots", "max_tx_cap_violation_J", "unused_spill_J", "min_slave_level_margin_J"):
+        if key in k_rep:
+            print(f"  {key}: {k_rep[key]}")
+
+    cap = f"Integrated DWF: UOWC energy sharing, slave THz bursts ({link['preset']}, {link['d_m'] * 1e3:g} mm)"
+    if banner:
+        cap += "  [DUMMY values in use]"
+    plot_link_power(jp, r_rep, out("plot_link_power.png"), cap)
+    plot_transmit_power(jp, r_rep, out("plot_transmit_power.png"), cap)
+    plot_slave_battery(jp, r_rep, out("plot_slave_battery.png"), cap)
+    plot_throughput_per_slot(jp, r_rep, out("plot_throughput_per_slot.png"), cap)
+    plot_throughput_cumulative(jp, r_rep, out("plot_throughput_cumulative.png"), cap)
+    plot_harvested_energy(jp, r_rep, out("plot_harvested_energy.png"), cap)
+    plot_sharing_energy(jp, r_rep, out("plot_sharing_energy.png"), cap)
+    plot_cumulative_energy(jp, r_rep, out("plot_cumulative_energy.png"), cap)
+    plot_physical_stored_power(jp, r_rep, ph_rep, out("plot_physical_stored_power.png"), cap)
+    plot_physical_slave_battery(jp, r_rep, ph_rep, out("plot_physical_slave_battery.png"), cap)
+    plot_slave_load_per_slot(jp, r_rep, load, out("plot_slave_load_per_slot.png"), cap)
+    plot_slave_energy_breakdown(jp, r_rep, load, out("plot_slave_energy_breakdown.png"), cap)
+    plot_slave_cumulative_energy(jp, r_rep, load, out("plot_slave_cumulative_energy.png"), cap)
+    plot_slave_battery_window(jp, r_rep, load, out("plot_slave_battery_window.png"), cap)
+    plot_event_bursts(jp, r_rep, rows, load, out("plot_event_bursts.png"), cap, cfg.BER_TARGET)
+    write_slave_energy_csv(out("slave_energy_profile.csv"), jp, r_rep, load, link_rows=rows, stop=stop)
+    print(f"wrote 15 PNGs and slave_energy_profile.csv to {outdir}")
+    # The THz-link figures of the notebook (sections 7-12) at the slave_config link values, with this demo's operating
+    # point marked; their Monte-Carlo parts use their own seeded rng (no effect on the numbers above).
+    thz = write_thz_link_plots(setup_from_slave_config(preset=preset), out("thz_link"))
+    print(f"wrote {len(thz)} THz-link PNGs to {out('thz_link')}")
+    return jp, r_rep, ph_rep
 
 
 def physical_demo(outdir: str = "out_physical_demo"):
