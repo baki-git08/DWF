@@ -15,5 +15,6 @@ from .physical import (
 )
 from .slave_panels import (
     C_MCU, C_MEM, C_MPPT, LOAD_COLORS, LOAD_LABELS, plot_slave_battery_window, plot_slave_cumulative_energy,
-    plot_slave_energy_breakdown, plot_slave_load_per_slot, slave_load_components, write_slave_energy_csv,
+    plot_slave_energy_breakdown, plot_slave_load_per_slot, slave_load_components, write_refusal_history_csv,
+    write_slave_energy_csv,
 )

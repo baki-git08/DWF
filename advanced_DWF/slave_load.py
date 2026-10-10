@@ -820,8 +820,8 @@ if __name__ == "__main__":
     sch = slave_schedule_demo(60)
     N = len(sch)
     timing = load_timing(sch)
-    beta = 0.311                               # 532 nm GaAs + MPPT 0.95 (physical_chain.py doc)
-    alpha = np.exp(-0.046 * 0.0005)            # README: c = 0.046 1/m, d = 0.5 mm
+    beta = 0.38                               # 532 nm GaAs + MPPT 0.95 (physical_chain.py doc)
+    alpha = np.exp(-0.046 * 5)                # README: c = 0.046 1/m, d = 5 m
     a = beta * alpha
 
     print("== datasheet consistency (stated vs V x I) ==")

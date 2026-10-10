@@ -167,7 +167,7 @@ def _warm_start_violation(jp: JointParams, f, g, d, tol: float):
     return None
 
 
-def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000,
+def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 1000,
               cross_run: bool | None = None, x0=None) -> JointResult:
     """Solve the master + slave problem by directional water-filling (block coordinate ascent).
 
@@ -533,6 +533,7 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 100_000,
     # ---- main loop: sweeps over the slots -------------------------------------------------------
     it, converged = 0, False
     while it < max_iter:
+        print(f"joint_dwf sweep {it} (start = {start})")
         big = 0.0                                                   # largest move in this sweep [J]
         order = range(N) if it % 2 == 0 else range(N - 1, -1, -1)   # alternate direction each sweep
         for k in order:

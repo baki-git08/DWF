@@ -6,7 +6,7 @@
 #   * a sleep/retain time of None means "the rest of the slot" (tau - the active times).
 # ON_SLOT durations are used in slots where jp.slave_schedule == 1, SILENT_SLOT durations where it is 0.
 
-TIMING_IS_DUMMY = True        # flip to False once every duration below is a measured value
+TIMING_IS_DUMMY = False        # flip to False once every duration below is a measured value
 
 TAU_S = 60.0                  # must equal MasterParams.tau; validated at attach time
 
@@ -86,23 +86,27 @@ NOISE_FIGURE_DB = 10.0
 R_s = 1e9                            # symbol rate [sym/s] = noise bandwidth
 ALPHA_THZ = 12300.0                  # molecular extinction [1/m]
 PT_W = 20e-3                         # photomixer radiated power used by the notebook tables [W]
-BER_TARGET = 1e-3
+BER_TARGET = 1e-6
 PAYLOAD_BYTES = 8 * 1024 * 1024      # 8 MiB image per event
 MODULATION = "16-QAM"                # t_tx = 8*PAYLOAD_BYTES / (R_s * bits_per_symbol) = 16.777216 ms
 
 # ---------------- photomixer (THz source) ----------------
 P_PM_RAD_MAX_W = 0.020               # radiated power cap (antenna 50-100 ohm)
 P_PM_ELEC_W = 0.200                  # electrical power while transmitting at the cap
-P_PM_RAD_MIN_W = 0.001               # radiated floor: a burst below it is refused
+P_PM_RAD_MIN_W = 0.0005               # radiated floor: a burst below it is refused
 ETA_TX_PM = P_PM_RAD_MAX_W / P_PM_ELEC_W   # = 0.1, radiated / electrical  (legacy ETA_TX above is a different, DUMMY knob)
 PM_DC_MODE = "proportional"          # "proportional": burst energy is a DWF variable in [x_min, x_cap]
 #                                      "fixed_bias"  : every event costs P_PM_ELEC_W * t_tx (fixed, in c_i)
 
 # ---------------- energy chain: UOWC -> PV -> MPPT -> supercap ----------------
-D_UOWC_M = 1.0e-3                    # DUMMY: master -> slave optical distance [m] (set by hand)
-UOWC_C_PER_M = 0.046                 # water attenuation at 450 nm [1/m] (given)
-ETA_LD = 1.0                         # DUMMY: laser electrical -> optical efficiency (inside alpha)
-LASER_P_OPT_MAX_W = None             # DUMMY: laser optical power cap [W]; None = M5 off
+D_UOWC_M = 16                        # master -> slave optical (energy) distance [m]; the link works over 1 - 5 m,
+#                                      5 m = the far end (conservative).  NOT the THz distance (D_THZ_M, mm range).
+UOWC_C_PER_M = 0.315                 # water attenuation at 450 nm [1/m] (given)
+UOWC_GEOM = 1.0                      # DUMMY: fraction of the laser beam the slave's PV array captures at D_UOWC_M
+#                                      (beam divergence vs PV aperture).  1.0 = no spreading loss; at metres a real
+#                                      beam spreads, so this is optimistic until a beam/aperture value is set.
+ETA_LD = 0.4                         # DUMMY: laser electrical -> optical efficiency (inside alpha)
+LASER_P_OPT_MAX_W = 1                # DUMMY: laser optical power cap [W]; None = M5 off
 PV_CAL_WAVELENGTH_NM = 532           # wavelength at which beta is calibrated against physical_chain.py (legacy demos: 532)
 MPPT_EFF = 0.95                      # MPPT conversion efficiency (0.90 - 0.95), inside beta
 ETA_SC = 0.95                        # DUMMY: supercap storage efficiency, inside beta
@@ -133,4 +137,4 @@ EVENT_COMPONENTS = [
 ]
 
 # Values that are not measured yet: listed in the banner of every event-model run.  Remove a name once real.
-DUMMY_VALUES = ("ETA_SC", "ETA_LD", "LASER_P_OPT_MAX_W", "MAX_DELAY_SLOTS", "D_UOWC_M")
+DUMMY_VALUES = ("ETA_SC", "ETA_LD", "LASER_P_OPT_MAX_W", "MAX_DELAY_SLOTS", "UOWC_GEOM")

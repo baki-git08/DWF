@@ -151,6 +151,30 @@ def write_slave_energy_csv(path: str, jp: JointParams, r: JointResult, load: dic
             w.writerow(row)
 
 
+def write_refusal_history_csv(path: str, history: list):
+    """refusal_history.csv: the stage-6 refusal loop pass by pass (physical.solve_with_refusals, RefusalResult.history).
+    One row per event action, so it filters easily:
+
+        pass, reason, start, action, from_slot, to_slot, release
+          pass    1-based pass number (the "refusal loop N pass(es)" count)
+          reason  "supercap short at slot k0" (the event load cannot be paid, latest event at or before k0 refused),
+                  "x < x_min" (burst below the 1 mW radiated floor), "all events affordable" (last pass), or
+                  "infeasible at slot k0 with no event at or before it: ..." (the loop stops, unresolved)
+          start   how joint_dwf started on that pass ("infeasible" when the solve raised InfeasibleSlaveBudget)
+          action  "moved" (to_slot = the slot it moves to), "dropped" (to_slot empty), "" = pass with no action
+    Every refused event appears as exactly one moved or dropped row, so "refused" is not a separate column."""
+    import csv
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["pass", "reason", "start", "action", "from_slot", "to_slot", "release"])
+        for p, h in enumerate(history, 1):
+            head = [p, h["reason"], h["start"]]
+            rows = ([["moved", i, j, rel] for i, j, rel in h["moves"]]
+                    + [["dropped", i, "", rel] for i, rel in h["dropped"]])
+            for row in sorted(rows, key=lambda x: x[1]) or [["", "", "", ""]]:
+                w.writerow(head + row)
+
+
 def plot_event_bursts(jp: JointParams, r: JointResult, link_rows: list, profile: dict, path: str, title: str = "",
                       ber_target: float = 1e-3):
     """Stage 6: THz burst of every event.  Top: burst energy x per run slot against x_min (1 mW radiated floor)

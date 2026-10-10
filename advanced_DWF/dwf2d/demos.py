@@ -18,9 +18,9 @@ from .plotting.joint import (
 from .plotting.physical import plot_loss_histogram, plot_physical_slave_battery, plot_physical_stored_power
 from .plotting.slave_panels import (
     plot_event_bursts, plot_slave_battery_window, plot_slave_cumulative_energy, plot_slave_energy_breakdown,
-    plot_slave_load_per_slot, write_slave_energy_csv,
+    plot_slave_load_per_slot, write_refusal_history_csv, write_slave_energy_csv,
 )
-from .plotting.thz_link import setup_from_slave_config, write_thz_link_plots
+from .plotting.thz_link import plot_received_power_vs_distance, setup_from_slave_config, write_thz_link_plots
 
 
 # ----------------------------------------------------------------------------
@@ -122,7 +122,7 @@ def _integrated_problem(preset: str | None = None, n_periods: int = 1):
     import slave_load
     # h = 1.0 is a PLACEHOLDER: with theta1 = 0 the master has no data, so h only appears in step() with weight 0.
     master = MasterParams(E=np.tile(Harvested_energy_winter, int(n_periods)), E_max=np.inf, tau=60.0, h=1.0)
-    jp0 = JointParams(master=master, alpha=uowc_alpha(cfg.D_UOWC_M, cfg.UOWC_C_PER_M, cfg.ETA_LD), beta=0.4,
+    jp0 = JointParams(master=master, alpha=uowc_alpha(cfg.D_UOWC_M, cfg.UOWC_C_PER_M, cfg.ETA_LD, cfg.UOWC_GEOM), beta=0.8,
                       theta1=0.0, slave_schedule=cfg.SLAVE_SCHEDULE)
     link = slave_load.thz_link(preset)
 
@@ -157,6 +157,7 @@ def integrated_demo(outdir: str = "out_integrated_demo", preset: str | None = No
                              calib_kw=calib, solver_kw=dict(tol=1e-15))
     print(f"integrated_demo: {jp0.master.N} slots, {int(np.sum(jp0.slave_schedule))} events released, "
           f"preset {link['preset']}, refusal loop {rr.passes} pass(es), converged {rr.converged}")
+    write_refusal_history_csv(out("refusal_history.csv"), rr.history)   # saved even when the loop did not converge
     if not rr.converged or rr.r is None:
         print("integrated_demo: the refusal loop did not converge; no consistent schedule to report")
         for h in rr.history:
@@ -197,7 +198,8 @@ def integrated_demo(outdir: str = "out_integrated_demo", preset: str | None = No
         if key in k_rep:
             print(f"  {key}: {k_rep[key]}")
 
-    cap = f"Integrated DWF: UOWC energy sharing, slave THz bursts ({link['preset']}, {link['d_m'] * 1e3:g} mm)"
+    cap = (f"Integrated DWF: UOWC energy sharing ({cfg.D_UOWC_M:g} m), "
+           f"slave THz bursts ({link['preset']}, {link['d_m'] * 1e3:g} mm)")
     if banner:
         cap += "  [DUMMY values in use]"
     plot_link_power(jp, r_rep, out("plot_link_power.png"), cap)
@@ -215,8 +217,9 @@ def integrated_demo(outdir: str = "out_integrated_demo", preset: str | None = No
     plot_slave_cumulative_energy(jp, r_rep, load, out("plot_slave_cumulative_energy.png"), cap)
     plot_slave_battery_window(jp, r_rep, load, out("plot_slave_battery_window.png"), cap)
     plot_event_bursts(jp, r_rep, rows, load, out("plot_event_bursts.png"), cap, cfg.BER_TARGET)
+    plot_received_power_vs_distance(jp, r_rep, link, out("plot_received_power_vs_distance.png"), cap)
     write_slave_energy_csv(out("slave_energy_profile.csv"), jp, r_rep, load, link_rows=rows, stop=stop)
-    print(f"wrote 15 PNGs and slave_energy_profile.csv to {outdir}")
+    print(f"wrote 16 PNGs, slave_energy_profile.csv and refusal_history.csv to {outdir}")
     # The THz-link figures of the notebook (sections 7-12) at the slave_config link values, with this demo's operating
     # point marked; their Monte-Carlo parts use their own seeded rng (no effect on the numbers above).
     thz = write_thz_link_plots(setup_from_slave_config(preset=preset), out("thz_link"))

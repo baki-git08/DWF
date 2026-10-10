@@ -558,3 +558,109 @@ def write_thz_link_plots(S: ThzLinkSetup, outdir: str, dpi: int = 100) -> list[s
     save(plot_max_range_vs_gain(S), "max_range_vs_gain.png")
     save(plot_max_range_heatmap(S), "max_range_heatmap.png")
     return paths
+
+
+# ----------------------------------------------------------------------------
+# Both links of the integrated scenario: received power vs distance (DWF panel style)
+# ----------------------------------------------------------------------------
+def _dbm(p_w):
+    """Power [W] -> dBm (zeros map to -inf)."""
+    with np.errstate(divide="ignore"):
+        return 10 * np.log10(np.asarray(p_w, float)) + 30
+
+
+def plot_received_power_vs_distance(jp, r, link: dict, path: str, title: str = ""):
+    """Received power vs distance for the two links of the integrated scenario (one PNG, two panels).
+
+    Left, optical energy link (UOWC, master laser -> slave PV), distance 0.1 mm .. 100 m:
+        P_rx(d)     = (delta/tau) * uowc_alpha(d, c, eta_ld, geom) optical power at the PV  (ETA_LD exp(-c d) UOWC_GEOM)
+        P_stored(d) = beta * P_rx(d)                              electrical power into the supercap
+        delta/tau is taken from the DWF solution r (peak and mean over the slots that share).
+    Right, THz data link (slave photomixer -> receiver), distance 0.01 .. 3 mm:
+        Pr(d) = link_budget at the photomixer cap (ETA_TX_PM x P_PM_ELEC_W = 20 mW radiated), one curve per preset
+        (dashed where Friis is not valid), with the noise floor and the power the BER target needs.
+    The operating distances D_UOWC_M and D_THZ_M are marked.  link = slave_load.thz_link() (preset, gains, noise).
+    """
+    import slave_config as cfg
+    from scipy.optimize import brentq
+    from .style import C_LINK, C_SLAVE, GRID, INK, INK2, _style
+
+    def legend_below(ax):
+        ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(0.0, -0.16), fontsize=8.5, labelcolor=INK2,
+                  borderaxespad=0)
+
+    tau = jp.master.tau
+    fig, (axo, axt) = plt.subplots(1, 2, figsize=(15.5, 7.4), facecolor="white")
+    for ax in (axo, axt):
+        _style(ax)
+
+    # ---- optical energy link -------------------------------------------------------------------
+    d_o = np.logspace(-4, 2, 400)                                       # 0.1 mm .. 100 m
+    alpha_d = ch.uowc_alpha(d_o, cfg.UOWC_C_PER_M, cfg.ETA_LD, cfg.UOWC_GEOM)
+    sent = np.asarray(r.delta, float) / tau                             # master electrical sharing power [W]
+    on = sent > 1e-12 * max(sent.max(), 1e-300)
+    beta = float(np.mean(jp.beta[on])) if on.any() else float(np.mean(jp.beta))
+    if on.any():
+        for p_tx, ls, name in ((sent[on].max(), "-", "peak"), (sent[on].mean(), "-.", "mean")):
+            axo.plot(d_o, _dbm(p_tx * alpha_d), color=C_LINK, lw=2, ls=ls,
+                     label=f"optical at the PV, {name} slot ({p_tx * 1e3:.3g} mW sent)")
+            axo.plot(d_o, _dbm(beta * p_tx * alpha_d), color=C_LINK, lw=1.2, ls=":" if name == "peak" else (0, (1, 3)),
+                     label=f"stored after PV/MPPT/supercap (x beta {beta:.3f}), {name} slot")
+        d_op = cfg.D_UOWC_M
+        p_op = sent[on].max() * float(ch.uowc_alpha(d_op, cfg.UOWC_C_PER_M, cfg.ETA_LD, cfg.UOWC_GEOM))
+        axo.axvline(d_op, color=INK, lw=1, ls="--")
+        axo.plot(d_op, _dbm(p_op), "o", color=INK, ms=6,
+                 label=f"DWF operating point: D_UOWC_M = {d_op:g} m, {_dbm(p_op):.2f} dBm (peak)")
+    else:
+        axo.text(0.5, 0.5, "the master shares nothing in this solution", transform=axo.transAxes, ha="center", color=INK2)
+    axo.set_xscale("log")
+    axo.set_xlabel("master - slave distance [m]  (log scale)")
+    axo.set_ylabel("received power [dBm]")
+    axo.axvspan(1.0, 5.0, color=GRID, alpha=0.35, lw=0, label="design range of the energy link, 1 - 5 m")
+    axo.set_title(f"Optical energy link (UOWC): c = {cfg.UOWC_C_PER_M:g} 1/m, ETA_LD = {cfg.ETA_LD:g}, "
+                  f"beam capture UOWC_GEOM = {cfg.UOWC_GEOM:g}",
+                  loc="left", color=INK2, fontsize=10)
+    axo.text(0.01, 0.02, f"Beer-Lambert x UOWC_GEOM = {cfg.UOWC_GEOM:g} (no beam-spreading model): "
+             "optimistic at metres while UOWC_GEOM = 1",
+             transform=axo.transAxes, fontsize=8, color=INK2)
+    legend_below(axo)
+
+    # ---- THz data link -----------------------------------------------------------------------
+    d_t = np.linspace(0.01, 3.0, 400) * 1e-3
+    p_rad = link["eta_tx"] * cfg.P_PM_ELEC_W                             # radiated at the photomixer cap [W]
+    n_w = link["noise_w"]
+    tones = {"0.1 THz": "#7fb8e0", "0.3 THz": C_SLAVE}
+    for label, f in cfg.THZ_FREQS_HZ.items():
+        g_tx, g_rx = ch.LEGACY_GAIN_DBI if cfg.LEGACY_GAINS else tuple(cfg.GAIN_DBI_BY_FREQ[label])
+        b = ch.link_budget(f, d_t, g_tx, g_rx, p_rad, n_w, alpha=cfg.ALPHA_THZ)
+        pr = b["pr_dbw"] + 30
+        d_nf = float(ch.near_field_limit_m(f, g_tx, g_rx))
+        valid = d_t >= d_nf
+        col = tones.get(label, C_SLAVE)
+        axt.plot(d_t[~valid] * 1e3, pr[~valid], color=col, lw=1.4, ls="--", alpha=0.8)
+        axt.plot(d_t[valid] * 1e3, pr[valid], color=col, lw=2,
+                 label=f"{label}, {g_tx:g}/{g_rx:g} dBi (dashed: Friis not valid, d < {d_nf * 1e3:.2f} mm)")
+    axt.axhline(_dbm(n_w), color=GRID, lw=1.2, ls=":", label=f"noise floor N = {_dbm(n_w):.1f} dBm")
+    sch = ch.qam_scheme(cfg.MODULATION)
+    k = sch["bits_per_symbol"]
+    snr_req_db = brentq(lambda x: float(sch["ber_func"](10 ** (x / 10) / k)) - cfg.BER_TARGET, -10.0, 60.0)
+    axt.axhline(_dbm(n_w) + snr_req_db, color=INK2, lw=1.2, ls="-.",
+                label=f"needed for BER {cfg.BER_TARGET:g} ({cfg.MODULATION}): {_dbm(n_w) + snr_req_db:.1f} dBm")
+    b_op = ch.link_budget(link["freq_hz"], link["d_eff"], link["g_tx_dbi"], link["g_rx_dbi"], p_rad, n_w, alpha=cfg.ALPHA_THZ)
+    pr_op = float(b_op["pr_dbw"]) + 30
+    axt.axvline(link["d_eff"] * 1e3, color=INK, lw=1, ls="--")
+    axt.plot(link["d_eff"] * 1e3, pr_op, "o", color=INK, ms=6,
+             label=f"DWF operating point: {link['preset']}, D_THZ_M = {link['d_eff'] * 1e3:g} mm, {pr_op:.1f} dBm "
+                   f"(SNR {pr_op - _dbm(n_w):.1f} dB)")
+    axt.set_ylim(_dbm(n_w) - 60, _dbm(p_rad) + 30)
+    axt.set_xlabel("slave - receiver distance [mm]")
+    axt.set_ylabel("received power [dBm]")
+    axt.set_title(f"THz data link: {p_rad * 1e3:g} mW radiated (photomixer cap), {_dbm(p_rad):.1f} dBm",
+                  loc="left", color=INK2, fontsize=10)
+    legend_below(axt)
+
+    head = "Received power vs distance: optical energy link and THz data link" + (f"\n{title}" if title else "")
+    fig.suptitle(head, x=0.01, ha="left", color=INK, fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.savefig(path, dpi=140)
+    plt.close(fig)

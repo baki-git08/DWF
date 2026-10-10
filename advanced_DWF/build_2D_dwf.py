@@ -254,6 +254,7 @@ from dwf2d.plotting.slave_panels import (  # noqa: F401
     plot_slave_energy_breakdown,
     plot_slave_load_per_slot,
     slave_load_components,
+    write_refusal_history_csv,
     write_slave_energy_csv,
 )
 from dwf2d.plotting.thz_link import (  # noqa: F401   (stage 6: the notebook's THz-link figures)
@@ -267,6 +268,7 @@ from dwf2d.plotting.thz_link import (  # noqa: F401   (stage 6: the notebook's T
     plot_link_characteristics,
     plot_max_range_heatmap,
     plot_max_range_vs_gain,
+    plot_received_power_vs_distance,
     plot_sim_vs_theory,
     plot_snr_power_vs_distance,
     setup_from_slave_config,
