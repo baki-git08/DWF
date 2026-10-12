@@ -493,7 +493,7 @@ def diagnose_no_data(jp, r, stop: list | None = None, profile: dict | None = Non
     out = dict(harvested=etot, sent=sent, unused_spill=float(tau * r.P.sum()), stored=float((a * r.delta).sum()),
                slave_overhead=float(jp.overhead.sum()), slave_bursts=float(tau * r.Pbar.sum()),
                final_level_above_floor=float(r.b[-1] - jp.B_min), rate_slave=r.rate_slave, objective=r.objective,
-               shared_fraction=sent / etot if etot else 0.0)
+               shared_fraction=sent / etot if etot else 0.0, master_kept=float(r.F[-1]))
     if stop is not None:
         out["stop_counts"] = {s: stop.count(s) for s in sorted(set(stop))}
     if not verbose:
@@ -504,13 +504,22 @@ def diagnose_no_data(jp, r, stop: list | None = None, profile: dict | None = Non
     print(line)
     print(f"  tap a = beta*alpha: {_rng(a)}  (alpha {_rng(jp.alpha)}, beta {_rng(jp.beta)})")
     print(f"  slave supercap: B_min {jp.B_min:.4g} J, B_max {jp.B_max:.4g} J (window {jp.W:.4g} J), b0 {jp.b0:.4g} J")
-    print(f"  harvested {etot:.6g} J = sent {sent:.6g} J ({100 * out['shared_fraction']:.4f}%) + unused / spill "
-          f"{out['unused_spill']:.6g} J (+ master leftover {float(r.F[-1]):.2g})")
+    if np.isfinite(m.E_max) or jp.master_floor_J is not None:
+        fl = "off" if jp.master_floor_J is None else f"{jp.master_floor_J:.6g} J"
+        print(f"  master battery: capacity E_max {m.E_max:.6g} J, reserve floor F_min {fl}, "
+              f"level in [{float(r.F.min()):.6g}, {float(r.F.max()):.6g}] J")
+        print(f"  harvested {etot:.6g} J = sent {sent:.6g} J ({100 * out['shared_fraction']:.4f}%) + kept by master "
+              f"{out['master_kept']:.6g} J ({100 * out['master_kept'] / etot if etot else 0.0:.4f}%) + unused / spill "
+              f"{out['unused_spill']:.6g} J")
+    else:
+        print(f"  harvested {etot:.6g} J = sent {sent:.6g} J ({100 * out['shared_fraction']:.4f}%) + unused / spill "
+              f"{out['unused_spill']:.6g} J (+ master leftover {float(r.F[-1]):.2g})")
     print(f"  stored {out['stored']:.6g} J + initial excess {jp.g_init:.4g} J = slave electronics {out['slave_overhead']:.6g} J "
           f"+ THz bursts {out['slave_bursts']:.6g} J + final level above floor {out['final_level_above_floor']:.6g} J")
     if stop is not None:
         expl = {"ceiling": "supercap reaches B_max on arrival", "S5": "MPPT input rating", "M5": "laser cap",
-                "master": "master's own energy", "full": "arrived full: delta = 0"}
+                "master": "master's own energy", "floor": "master's reserve floor",
+                "full": "arrived full: delta = 0"}
         print("  master stops sharing (per slot): " + ", ".join(f"{k} {v} ({expl.get(k, k)})" for k, v in out["stop_counts"].items()))
     if profile is not None:
         ks = profile["overhead_keys"]

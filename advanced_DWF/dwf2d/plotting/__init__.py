@@ -7,7 +7,8 @@
 """
 from .style import BITS_PER_NAT, C_LINK, C_MASTER, C_SLAVE, EDGE_TOL, GRID, INK, INK2
 from .joint import (
-    plot_cumulative_energy, plot_harvested_energy, plot_link_power, plot_sharing_energy, plot_slave_battery,
+    plot_cumulative_energy, plot_harvested_energy, plot_link_power, plot_master_battery, plot_sharing_energy,
+    plot_slave_battery,
     plot_throughput_cumulative, plot_throughput_per_slot, plot_transmit_power,
 )
 from .physical import (

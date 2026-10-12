@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from .params import JointParams, JointResult
-from .solver import InfeasibleSlaveBudget
+from .solver import InfeasibleSlaveBudget, master_floor_profile
 
 
 # ----------------------------------------------------------------------------
@@ -39,7 +39,7 @@ def check_kkt_joint(jp: JointParams, r: JointResult, tol: float = 1e-6) -> dict:
     jp : the problem;   r : the JointResult to test;   tol : (unused, kept for API symmetry)
 
     Returns a dict (targets in brackets):
-        final_master_carry           F_{N-1}                     [~0: master used all energy]
+        final_master_carry           F_{N-1}                     [~0: master used all energy; = fL[N] with a floor]
         slave_end_level              b_{N-1}                     [~B_min: slave used all usable energy]
         min_P, min_Pbar, min_delta   smallest values             [>= 0]
         slave_min_level              min_n b_n                   [>= B_min]
@@ -64,6 +64,8 @@ def check_kkt_joint(jp: JointParams, r: JointResult, tol: float = 1e-6) -> dict:
         tx_cap_active_slots / max_tx_cap_violation_J          S6  (delta test skipped where S6 binds)
         tx_floor_active_slots / max_tx_floor_violation_J      S7
         delta_cap_active_slots / max_delta_cap_violation_J    M5  (delta test skipped where M5 binds)
+        master_floor_binding_slots / min_master_floor_margin_J  M6  F_k = fL[k+1] (k < N-1) / min(F_k - fL[k+1])  [>= 0]
+        master_full_slots                                       M2  F_k = E_max - E_{k+1}  (finite E_max only)
     """
     m = jp.master
     jm_tau = m.tau
@@ -101,6 +103,13 @@ def check_kkt_joint(jp: JointParams, r: JointResult, tol: float = 1e-6) -> dict:
         cap_slack = cap_slack & ~m5_bind
         extra["delta_cap_active_slots"] = int(m5_bind.sum())
         extra["max_delta_cap_violation_J"] = float(max(np.max(np.where(np.isfinite(dc), r.delta - dc, -np.inf)), 0.0))
+    etol = 1e-9 * max(m.E.mean(), 1.0)
+    if jp.master_floor_J is not None:                            # M6: master reserve floor
+        fL = master_floor_profile(jp)
+        extra["master_floor_binding_slots"] = int((r.F[:-1] <= fL[1:-1] + etol).sum())
+        extra["min_master_floor_margin_J"] = float((r.F[:-1] - fL[1:-1]).min()) if m.N > 1 else 0.0
+    if np.isfinite(m.E_max) and m.N > 1:                         # M2: master battery full on the next arrival
+        extra["master_full_slots"] = int((r.F[:-1] >= m.cap - etol).sum())
     if no_data:                                                  # master out of energy (xm = 0) also stops delta
         xm = jm_tau * r.P
         free = cap_slack & (xm > 1e-9 * max(m.E.mean(), 1.0))
@@ -151,6 +160,8 @@ def reference_solution_joint(jp: JointParams):
         master causality   cum(x+dl)_k <= cum(E)_k                    M1  (F_k >= 0)
         master uses all    cum(x+dl)_{N-1} == cum(E)_{N-1}            F_{N-1} = 0
         master ceiling     cum(E)_k - cum(x+dl)_k <= E_max - E_{k+1}  M2  (only if E_max finite)
+        master floor       cum(E)_k - cum(x+dl)_k >= fL[k+1], and fL[N] instead of 0 at the end
+                                                                      M6  (only if jp.master_floor_J is set)
         slave floor        b0 + cum(a*dl - xb - c)_k >= B_min         S1  (b_k >= B_min)
         slave ceiling      b0 + cum(a*dl)_k - cum(xb + c)_{k-1} <= B_max  S2  (b_{k-1} + a_k dl_k <= B_max)
         slave terminal     b0 + cum(a*dl - xb - c)_{N-1} == B_min    g[N] = 0 (same as joint_dwf)
@@ -172,8 +183,9 @@ def reference_solution_joint(jp: JointParams):
     x, dl, xb = cp.Variable(N, nonneg=True), cp.Variable(N, nonneg=True), cp.Variable(N, nonneg=True)
     cumE = np.cumsum(E)                                                 # cumulative harvest sum_{i<=k} E_i
     cum = lambda v: cp.cumsum(v)                                        # cumulative sum of a cvxpy vector
-    cons = [cum(x + dl) <= cumE,                                        # master causality
-            cum(x + dl)[-1] == cumE[-1],
+    fL = master_floor_profile(jp)                                       # M6 floor (zeros when off)
+    cons = [cum(x + dl) <= cumE - fL[1:],                               # master causality (+ floor)
+            cum(x + dl)[-1] == cumE[-1] - fL[-1],
             jp.b0 + cum(cp.multiply(a, dl) - xb - cS) >= jp.B_min,      # slave floor (end of slot)
             jp.b0 + cum(cp.multiply(a, dl)) - cp.hstack([0, cum(xb + cS)[:-1]]) <= jp.B_max,  # slave ceiling (arrival)
             jp.b0 + cum(cp.multiply(a, dl) - xb - cS)[-1] == jp.B_min]  # slave terminal: g[N] = 0
@@ -211,7 +223,7 @@ def reference_solution_joint(jp: JointParams):
 # Randomised cross-check of joint_dwf against reference_solution_joint (stage-6 gate)
 # ----------------------------------------------------------------------------
 PARITY_FAMILIES = ("default", "tight_window", "per_slot_beta", "finite_E_max", "s6_binding",
-                   "s6_s5_binding", "rate_window", "theta1_zero", "integrated_like")
+                   "s6_s5_binding", "rate_window", "theta1_zero", "integrated_like", "master_floor")
 
 
 def random_parity_case(rng: np.random.Generator, family: str) -> JointParams:
@@ -227,6 +239,8 @@ def random_parity_case(rng: np.random.Generator, family: str) -> JointParams:
     theta1_zero    master has no data (theta1 = 0), window in [2, 20] J
     integrated_like  theta1 = 0, random event schedule, per-slot drain c_i, S6 in event slots, S5,
                    T_i = 0.01 tau, small window: the stage-6 structure at test scale
+    master_floor   M6: E_max in [1.5, 3] x max(E), floor in [0.2, 0.8] x (E_max - max E), theta1 = 0 in half the cases,
+                   per-slot slave drain c_i (just-in-time start, floor ramp after the slave's need)
     """
     from build_dwf import MasterParams
     N = int(rng.integers(8, 15))
@@ -261,6 +275,13 @@ def random_parity_case(rng: np.random.Generator, family: str) -> JointParams:
                   tx_cap_J=np.where(sched == 1, rng.uniform(0.05, 0.5, N), 0.0),
                   mppt_cap_J=float(rng.uniform(2.0, 6.0)), slave_rate_window=0.01 * tau,
                   B_max=1.0 + float(rng.uniform(1.5, 4.0)) * c.max() + 0.5)
+    elif family == "master_floor":
+        E_max = float(rng.uniform(1.5, 3.0) * E.max())
+        kw["master_floor_J"] = float(rng.uniform(0.2, 0.8) * (E_max - E.max()))
+        kw["slave_overhead_J"] = rng.uniform(0.05, 0.5, N)
+        if rng.random() < 0.5:
+            kw["theta1"] = 0.0
+            kw["B_max"] = 1.0 + float(rng.uniform(2.0, 20.0))
     elif family != "default":
         raise ValueError(f"unknown family {family!r} (known: {PARITY_FAMILIES})")
     return JointParams(master=MasterParams(E=E, E_max=E_max, tau=tau, h=h), **kw)
@@ -290,7 +311,8 @@ def parity_matrix(n_cases: int = 25, seed: int = 0, families=PARITY_FAMILIES, rt
             if not r.converged:
                 row["nonconverged"] += 1
             k = check_kkt_joint(jp, r)
-            for key in ("tx_cap_active_slots", "mppt_cap_active_slots", "arrival_cap_active_slots"):
+            for key in ("tx_cap_active_slots", "mppt_cap_active_slots", "arrival_cap_active_slots",
+                        "master_floor_binding_slots", "master_full_slots"):
                 if key in k:
                     row["binding"][key] = row["binding"].get(key, 0) + int(k[key] > 0)
             gap = (ref - r.objective) / max(abs(ref), 1e-12)

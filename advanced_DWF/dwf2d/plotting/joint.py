@@ -111,6 +111,35 @@ def plot_slave_battery(jp: JointParams, r: JointResult, path: str, title: str = 
     _finish(fig, ax, path, "Slave battery level against its floor and ceiling", title, jp)
 
 
+def plot_master_battery(jp: JointParams, r: JointResult, path: str, title: str = ""):
+    """Master battery F_k after each slot (solid) and the level right after the harvest arrives,
+    F_{k-1} + E_k (dashed), against the capacity E_max (M2, finite only) and the reserve floor F_min (M6, if set).
+    Slots where the master sits on its floor and where it is full on the next arrival are marked."""
+    from ..solver import master_floor_profile
+    m, t = jp.master, np.arange(jp.master.N)
+    m_floor, m_full, _, _ = _bound_masks(jp, r)
+    F_prev = np.concatenate([[0.0], r.F[:-1]])
+    fig, ax = _new_axis()
+    ax.plot(t, r.F, color=C_MASTER, lw=2, label="master battery at end of slot k, F_k")
+    ax.plot(t, F_prev + m.E, color=C_MASTER, lw=1.2, ls="--",
+            label="master battery just after the harvest arrives, F_(k-1) + E_k")
+    top = float(np.max(F_prev + m.E))
+    if np.isfinite(m.E_max):
+        ax.axhline(m.E_max, color=INK2, lw=1, ls=":")
+        ax.annotate(f"capacity E_max = {m.E_max:g} J", (t[-1], m.E_max), xytext=(0, 5),
+                    textcoords="offset points", ha="right", fontsize=9, color=INK2)
+        top = max(top, m.E_max)
+    if jp.master_floor_J is not None:
+        ax.step(t, master_floor_profile(jp)[1:], where="post", color=INK2, lw=1, ls="-.",
+                label=f"reserve floor fL_k (ramps to F_min = {jp.master_floor_J:g} J, then held)")
+    _mark(ax, t, r.F, m_floor, "on the floor: F_k = fL_k (M1 / M6 binding; last slot excluded)", "v", INK)
+    _mark(ax, t, r.F, m_full, "full: next harvest fills E_max (M2 binding, excess spilled)", "^", C_LINK)
+    ax.set_ylim(0, top * 1.08)
+    ax.set_ylabel("master battery energy [J]")
+    _legend(ax, "center right")
+    _finish(fig, ax, path, "Master battery level against its capacity and reserve floor", title, jp)
+
+
 def plot_cumulative_energy(jp: JointParams, r: JointResult, path: str, title: str = ""):
     """Cumulative energy that has ARRIVED vs cumulative energy CONSUMED, per node.
 

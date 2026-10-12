@@ -119,15 +119,16 @@ def _rates_bits(jp: JointParams, r: JointResult):
 def _bound_masks(jp: JointParams, r: JointResult):
     """Slots where a causality / capacity constraint is binding (the water level may jump there).
 
-    master_empty : F_k = 0     master battery empty after slot k   (M1, causality)   [not the last slot]
+    master_empty : F_k = fL    master battery empty / at its reserve floor after slot k  (M1 / M6)  [not the last slot]
     master_full  : F_k = cap_k master battery full after slot k    (M2, overflow)    [finite E_max only]
     slave_empty  : b_k = B_min slave battery at its floor          (S1, causality)   [not the last slot]
     slave_full   : b_peak_k = B_max  slave battery full on arrival (S2, overflow)
     """
+    from ..solver import master_floor_profile
     m, N = jp.master, jp.master.N
     master_empty = np.zeros(N, bool)
     master_full = np.zeros(N, bool)
-    master_empty[:-1] = r.F[:-1] <= EDGE_TOL
+    master_empty[:-1] = r.F[:-1] <= master_floor_profile(jp)[1:-1] + EDGE_TOL
     cap = np.asarray(m.cap, float)
     fin = np.isfinite(cap)
     master_full[:-1][fin] = r.F[:-1][fin] >= cap[fin] - EDGE_TOL

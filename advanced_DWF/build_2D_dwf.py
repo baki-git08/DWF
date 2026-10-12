@@ -187,6 +187,7 @@ from dwf2d.solver import (  # noqa: F401
     _lp_start,
     # stage 6
     fullest_trajectory,
+    master_floor_profile,
     maximal_sharing,
     warm_start_from,
 )
@@ -230,6 +231,7 @@ from dwf2d.plotting.joint import (  # noqa: F401
     plot_cumulative_energy,
     plot_harvested_energy,
     plot_link_power,
+    plot_master_battery,
     plot_sharing_energy,
     plot_slave_battery,
     plot_throughput_cumulative,

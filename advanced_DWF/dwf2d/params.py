@@ -51,6 +51,10 @@ class JointParams:
     slave_rate_window : T_i [s] (scalar or length N), the time over which the slave radiates its burst.  The
         slave rate term becomes  th2 * (T_i/2) ln(1 + hbar_i * x_i / T_i)  (x_i = tau*Pbar_i); T_i = t_tx is a
         burst, T_i = tau gives the stage-5 expression.  None = tau.
+    master_floor_J : M6, reserve floor F_min the master keeps for itself [J].  The master battery charges up to
+        F_min (after the slave's just-in-time need) and then never drops below it; only energy above the floor
+        is shared or spilled, and the master ends the horizon holding it (F_{N-1} = floor instead of 0).
+        Needs 0 <= F_min <= E_max - max(E[1:]).  Per-slot profile: solver.master_floor_profile().  None = off.
     theta1 = 0 is the stage-6 master: it has no data link, so its "data energy" tau*P_i is unused / spill.
     """
     master: MasterParams
@@ -69,6 +73,7 @@ class JointParams:
     tx_floor_J: np.ndarray | float | None = None         # S7: tau*Pbar_i >= tx_floor_J[i] in transmit slots (None = 0)
     delta_cap_J: np.ndarray | float | None = None        # M5: delta_k <= delta_cap_J[k]  (None = inf)
     slave_rate_window: np.ndarray | float | None = None  # T_i in (T_i/2) ln(1 + hbar*x_i/T_i)  (None = tau)
+    master_floor_J: float | None = None                  # M6: F_k >= floor_k, master reserve F_min [J] (None = off)
 
     def _per_slot(self, name: str, lo: float, allow_inf: bool) -> None:
         """Broadcast the optional per-slot field `name` to length N and check it (None stays None)."""
@@ -146,6 +151,13 @@ class JointParams:
                 raise ValueError("tx_floor_J exceeds tx_cap_J")
         if self.theta1 < 0 or self.theta2 < 0:
             raise ValueError("theta1 and theta2 must be >= 0")
+        if self.master_floor_J is not None:
+            # M6: the floor must fit under every master tap cap E_max - E_{k+1} (M2), or the master could not hold it
+            self.master_floor_J = float(self.master_floor_J)
+            room = float(np.min(self.master.cap)) if n > 1 else float(self.master.E_max)
+            if not (0.0 <= self.master_floor_J <= room):
+                raise ValueError(f"master_floor_J must be in [0, E_max - max(E[1:])] = [0, {room:.6g}] J, "
+                                 f"got {self.master_floor_J:.6g} J")
 
     @property
     def a(self) -> np.ndarray:            # net gain of the down tap

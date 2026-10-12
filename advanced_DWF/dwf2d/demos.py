@@ -12,8 +12,8 @@ from .params import JointParams
 from .physical import solve_with_physical_chain
 from .verification import check_kkt_joint
 from .plotting.joint import (
-    plot_cumulative_energy, plot_harvested_energy, plot_link_power, plot_sharing_energy, plot_slave_battery,
-    plot_throughput_cumulative, plot_throughput_per_slot, plot_transmit_power,
+    plot_cumulative_energy, plot_harvested_energy, plot_link_power, plot_master_battery, plot_sharing_energy,
+    plot_slave_battery, plot_throughput_cumulative, plot_throughput_per_slot, plot_transmit_power,
 )
 from .plotting.physical import plot_loss_histogram, plot_physical_slave_battery, plot_physical_stored_power
 from .plotting.slave_panels import (
@@ -31,7 +31,8 @@ from .plotting.thz_link import plot_received_power_vs_distance, setup_from_slave
 #                   by orders of magnitude in slave data energy (the real electronics cannot absorb the
 #                   legacy stage-4 flows).  That is expected, not a solver bug: inputs are NOT retuned.
 #   integrated_demo : stage 6 (slave_config.py STAGE 6 block): master shares over UOWC only (theta1 = 0), event-based
-#                   slave with THz bursts, refusal / rescheduling loop and maximal-sharing post-pass.
+#                   slave with THz bursts, refusal / rescheduling loop and maximal-sharing post-pass; master battery
+#                   capped at MASTER_E_MAX_J with a reserve floor MASTER_FLOOR_J it keeps for itself.
 # ----------------------------------------------------------------------------
 
 
@@ -114,16 +115,18 @@ def legacy_demo():
 
 
 def _integrated_problem(preset: str | None = None, n_periods: int = 1):
-    """Stage-6 problem: winter harvest, master with NO data link (theta1 = 0), UOWC energy link, event-based slave
-    (slave_config.py STAGE 6 block).  Returns (jp0, build, link): build(effective) attaches the event load.
+    """Stage-6 problem: winter harvest, master with NO data link (theta1 = 0), battery capacity MASTER_E_MAX_J and
+    reserve floor MASTER_FLOOR_J, UOWC energy link, event-based slave (slave_config.py STAGE 6 block).  Returns (jp0, build, link): build(effective) attaches the event load.
     n_periods repeats the 60-slot harvest (and the cyclic schedule) to N = 60 * n_periods (scalability runs)."""
     import dataclasses
     import slave_config as cfg
     import slave_load
     # h = 1.0 is a PLACEHOLDER: with theta1 = 0 the master has no data, so h only appears in step() with weight 0.
-    master = MasterParams(E=np.tile(Harvested_energy_winter, int(n_periods)), E_max=np.inf, tau=60.0, h=1.0)
+    # Master battery: capacity MASTER_E_MAX_J (M2) and reserve floor MASTER_FLOOR_J (M6) from slave_config.py.
+    master = MasterParams(E=np.tile(Harvested_energy_winter, int(n_periods)), E_max=float(cfg.MASTER_E_MAX_J),
+                          tau=60.0, h=1.0)
     jp0 = JointParams(master=master, alpha=uowc_alpha(cfg.D_UOWC_M, cfg.UOWC_C_PER_M, cfg.ETA_LD, cfg.UOWC_GEOM), beta=0.8,
-                      theta1=0.0, slave_schedule=cfg.SLAVE_SCHEDULE)
+                      theta1=0.0, slave_schedule=cfg.SLAVE_SCHEDULE, master_floor_J=cfg.MASTER_FLOOR_J)
     link = slave_load.thz_link(preset)
 
     def build(effective):
@@ -194,7 +197,8 @@ def integrated_demo(outdir: str = "out_integrated_demo", preset: str | None = No
           f"(R x MPPT_EFF {cfg.MPPT_EFF:g} x ETA_SC {cfg.ETA_SC:g}, {cfg.PV_CAL_WAVELENGTH_NM} nm)")
     print(f"            max |solver battery - physical battery| = {np.max(np.abs(r.b - ph.b_phys)):.3e} J (optimiser)"
           + (f", {np.max(np.abs(r_rep.b - ph_rep.b_phys)):.3e} J (post-pass)" if stop is not None else ""))
-    for key in ("tx_cap_active_slots", "max_tx_cap_violation_J", "unused_spill_J", "min_slave_level_margin_J"):
+    for key in ("tx_cap_active_slots", "max_tx_cap_violation_J", "unused_spill_J", "min_slave_level_margin_J",
+                "final_master_carry", "master_floor_binding_slots", "min_master_floor_margin_J", "master_full_slots"):
         if key in k_rep:
             print(f"  {key}: {k_rep[key]}")
 
@@ -205,6 +209,7 @@ def integrated_demo(outdir: str = "out_integrated_demo", preset: str | None = No
     plot_link_power(jp, r_rep, out("plot_link_power.png"), cap)
     plot_transmit_power(jp, r_rep, out("plot_transmit_power.png"), cap)
     plot_slave_battery(jp, r_rep, out("plot_slave_battery.png"), cap)
+    plot_master_battery(jp, r_rep, out("plot_master_battery.png"), cap)
     plot_throughput_per_slot(jp, r_rep, out("plot_throughput_per_slot.png"), cap)
     plot_throughput_cumulative(jp, r_rep, out("plot_throughput_cumulative.png"), cap)
     plot_harvested_energy(jp, r_rep, out("plot_harvested_energy.png"), cap)
@@ -219,7 +224,7 @@ def integrated_demo(outdir: str = "out_integrated_demo", preset: str | None = No
     plot_event_bursts(jp, r_rep, rows, load, out("plot_event_bursts.png"), cap, cfg.BER_TARGET)
     plot_received_power_vs_distance(jp, r_rep, link, out("plot_received_power_vs_distance.png"), cap)
     write_slave_energy_csv(out("slave_energy_profile.csv"), jp, r_rep, load, link_rows=rows, stop=stop)
-    print(f"wrote 16 PNGs, slave_energy_profile.csv and refusal_history.csv to {outdir}")
+    print(f"wrote 17 PNGs, slave_energy_profile.csv and refusal_history.csv to {outdir}")
     # The THz-link figures of the notebook (sections 7-12) at the slave_config link values, with this demo's operating
     # point marked; their Monte-Carlo parts use their own seeded rng (no effect on the numbers above).
     thz = write_thz_link_plots(setup_from_slave_config(preset=preset), out("thz_link"))

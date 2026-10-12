@@ -76,6 +76,29 @@ def _jit_start(jp: "JointParams"):
     return d, g, viol
 
 
+def master_floor_profile(jp: "JointParams") -> np.ndarray:
+    """M6 floor of the master carry, fL (length N+1):  f[k+1] = F_k >= fL[k+1],  f[N] = fL[N] (fixed end).
+
+        fL[0]   = 0                                                      (nothing arrives before slot 0)
+        fL[k+1] = L_k = min(F_min, max(0, L_{k-1} + E_k - need_k))       (charge up to F_min, then hold it)
+        fL[N]   = L_{N-1}                                                (the master ENDS holding its reserve)
+
+    need_k = just-in-time delta of _jit_start (what the slave is short of in slot k, clipped to what the master
+    has): the slave's minimum need is served first, the master's reserve second, sharing / spill come from what
+    is above the floor.  L_k <= E_max - E_{k+1} holds because JointParams checks F_min <= min(cap).
+    jp.master_floor_J None -> all zeros (the original f >= 0, f[N] = 0: bit-identical solver path)."""
+    N = jp.master.N
+    fL = np.zeros(N + 1)
+    if jp.master_floor_J is None:
+        return fL
+    E, Fm = jp.master.E, jp.master_floor_J
+    need = _jit_start(jp)[0]
+    for k in range(N):
+        avail = fL[k] + E[k]
+        fL[k + 1] = min(Fm, max(0.0, avail - min(need[k], avail)))
+    return fL
+
+
 def _lp_start(jp: "JointParams"):
     """Feasibility LP (scipy) with the constraints of reference_solution_joint: a start that may borrow
     against future harvest through the master carry f.  Returns (d, f, g) or None if infeasible."""
@@ -85,22 +108,23 @@ def _lp_start(jp: "JointParams"):
         return None
     m = jp.master
     N, E, a, cS, capA = m.N, m.E, jp.a, jp.overhead, jp.capA
+    fL = master_floor_profile(jp)                             # M6 floor (zeros when off)
     tx = jp.slave_schedule
-    nv = 3 * N                                                # variables: x (master data), d, xb (slave data)
+    nv = 3 * N                                               # variables: x (master data), d, xb (slave data)
     ix, idl, ixb = np.arange(N), N + np.arange(N), 2 * N + np.arange(N)
     L = np.tril(np.ones((N, N)))                              # cumulative-sum operator
     Lm = np.tril(np.ones((N, N)), -1)                         # strictly lower: cum up to k-1
     Z = np.zeros((N, N))
-    A_ub = [np.hstack([L, L, Z]),                             # M1: cum(x+d) <= cum(E)
+    A_ub = [np.hstack([L, L, Z]),                             # M1/M6: cum(x+d) <= cum(E) - floor
             np.hstack([Z, -L * a, L]),                        # S1: b0 + cum(a d - xb - c) >= B_min
             np.hstack([Z, L * a, -Lm])]                       # S2: b0 + cum(a d)_k - cum(xb + c)_{k-1} <= B_max
-    b_ub = [np.cumsum(E), jp.b0 - jp.B_min - np.cumsum(cS), jp.B_max - jp.b0 + Lm @ cS]
+    b_ub = [np.cumsum(E) - fL[1:], jp.b0 - jp.B_min - np.cumsum(cS), jp.B_max - jp.b0 + Lm @ cS]
     if np.isfinite(m.E_max):                                  # M2: cum(E) - cum(x+d) <= E_max - E_{k+1}
         A_ub.append(np.hstack([-L[:-1], -L[:-1], Z[:-1]]))
         b_ub.append(m.E_max - E[1:] - np.cumsum(E)[:-1])
-    A_eq = np.vstack([np.concatenate([np.ones(N), np.ones(N), np.zeros(N)]),     # master uses all its energy
+    A_eq = np.vstack([np.concatenate([np.ones(N), np.ones(N), np.zeros(N)]),     # master uses all but its end floor
                       np.concatenate([np.zeros(N), a, -np.ones(N)])])              # slave terminal g[N] = 0
-    b_eq = np.array([E.sum(), jp.B_min - jp.b0 + cS.sum()])
+    b_eq = np.array([E.sum() - fL[N], jp.B_min - jp.b0 + cS.sum()])
     bounds = [(0, None)] * (2 * N) + [(0, 0) if not tx[i] else (0, None) for i in range(N)]
     for i in range(N):                                        # S5 as an upper bound on d
         if np.isfinite(capA[i]):
@@ -120,8 +144,8 @@ def _lp_start(jp: "JointParams"):
     x, dl, xb = res.x[ix], res.x[idl], res.x[ixb]
     d = np.maximum(dl, 0.0)
     f = np.zeros(N + 1)
-    f[1:] = np.maximum(np.cumsum(E - x - dl), 0.0)
-    f[N] = 0.0
+    f[1:] = np.maximum(np.cumsum(E - x - dl), fL[1:])
+    f[N] = fL[N]
     g = np.zeros(N + 1)
     g[0] = jp.g_init
     g[1:] = np.maximum(jp.g_init + np.cumsum(a * dl - xb - cS), 0.0)
@@ -134,10 +158,11 @@ def _lp_start(jp: "JointParams"):
 # ----------------------------------------------------------------------------
 def warm_start_from(jp: JointParams, r: JointResult):
     """(f, g, d) flows of a previous result, for joint_dwf(..., x0=...):  f[k+1] = F_k, g[k+1] = b_k - B_min,
-    with f[0] = f[N] = 0, g[0] = b0 - B_min, g[N] = 0 (the solver's fixed ends)."""
+    with f[0] = 0, f[N] = fL[N] (0 without a master floor), g[0] = b0 - B_min, g[N] = 0 (the solver's fixed ends)."""
     N = jp.master.N
     f = np.zeros(N + 1)
     f[1:N] = r.F[:-1]
+    f[N] = master_floor_profile(jp)[N]
     g = np.zeros(N + 1)
     g[0] = jp.g_init
     g[1:N] = r.b[:-1] - jp.B_min
@@ -150,12 +175,13 @@ def _warm_start_violation(jp: JointParams, f, g, d, tol: float):
     N, E, a, cS = m.N, m.E, jp.a, jp.overhead
     if len(f) != N + 1 or len(g) != N + 1 or len(d) != N:
         return "wrong lengths"
-    if abs(f[0]) > tol or abs(f[N]) > tol or abs(g[0] - jp.g_init) > tol or abs(g[N]) > tol:
+    fL = master_floor_profile(jp)
+    if abs(f[0]) > tol or abs(f[N] - fL[N]) > tol or abs(g[0] - jp.g_init) > tol or abs(g[N]) > tol:
         return "fixed ends f[0], f[N], g[0], g[N]"
     xm = E + f[:-1] - f[1:] - d
     xs = a * d + g[:-1] - g[1:] - cS
     tx = jp.slave_schedule
-    checks = [("f >= 0", -f.min()), ("f <= E_max - E_next", np.max(f[1:N] - m.cap) if N > 1 else -1.0),
+    checks = [("f >= 0", -f.min()), ("f >= master floor", np.max(fL - f)), ("f <= E_max - E_next", np.max(f[1:N] - m.cap) if N > 1 else -1.0),
               ("g >= 0", -g.min()), ("d >= 0", -d.min()), ("P >= 0", -xm.min()), ("Pbar >= 0", -xs.min()),
               ("Pbar = 0 in silent slots", np.max(np.abs(xs[~tx])) if (~tx).any() else -1.0),
               ("arrival cap", np.max(g[:-1] + a * d - jp.W)), ("S5", np.max(a * d - jp.capA)),
@@ -230,9 +256,11 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 1000,
     has_s67 = has_s6 or has_s7
 
     # ---- state: the three families of flow variables (all in Joules) -------------------------
-    f = np.zeros(N + 1)                           # f[k+1] = master carry over tap k
-    #   f[k+1] = F_k = master energy carried from slot k to k+1;  f[0] = f[N] = 0 stay fixed
-    #   (nothing arrives before slot 0 and nothing is left after slot N-1).
+    fL = master_floor_profile(jp)                 # M6: f[q] >= fL[q] (all zeros without a master floor)
+    f = fL.copy()                                 # f[k+1] = master carry over tap k
+    #   f[k+1] = F_k = master energy carried from slot k to k+1;  f[0] = 0 and f[N] = fL[N] stay fixed
+    #   (nothing arrives before slot 0; after slot N-1 only the master's reserve is left, 0 without a floor).
+    #   Start "on the floor": the master holds its reserve, xm(k) = E_k + fL[k] - fL[k+1] >= need_k >= 0.
     g = np.zeros(N + 1)                           # g[k+1] = slave carry above floor
     #   g[k+1] = Gt_k = b_k - B_min;  g[0] = b0 - B_min (initial excess), g[N] = 0 stays fixed
     #   (the slave also uses all its energy by the end).
@@ -249,8 +277,8 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 1000,
         f0, g0_, d0_ = (np.asarray(v, float) for v in x0)
         why = _warm_start_violation(jp, f0, g0_, d0_, 1e-9 * max(float(E.mean()), 1.0))
         if why is None:
-            f[:], g[:], d[:] = np.maximum(f0, 0.0), np.maximum(g0_, 0.0), np.maximum(d0_, 0.0)
-            f[0] = f[N] = 0.0
+            f[:], g[:], d[:] = np.maximum(f0, fL), np.maximum(g0_, 0.0), np.maximum(d0_, 0.0)
+            f[0], f[N] = 0.0, fL[N]
             g[0], g[N] = jp.g_init, 0.0
         else:
             warm_note = f" (warm start rejected: {why})"
@@ -375,7 +403,7 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 1000,
 
         Constraints checked (equation numbers from the module docstring)
         ---------------------------------------------------------------
-        * f[q]              in [0, capM[q-1]]            M1, M2  (master right tap q-1)
+        * f[q]              in [fL[q], capM[q-1]]        M1/M6, M2  (master right tap q-1; fL = 0 without floor)
         * g[q]              >= 0                         S1      (slave floor)
         * d[q]              >= 0                         M3      (delta >= 0)
         * g[q] + a[q]*d[q]  <= W                         S2      (slave arrival cap at slot q)
@@ -404,7 +432,7 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 1000,
                 lo = max(lo, (U - v) / c); hi = min(hi, (L - v) / c)
         arr = {}                                # slave arrival-cap coefficient per slot q
         for q, c in fch:
-            lim(f[q], c, 0.0, capM[q - 1])
+            lim(f[q], c, fL[q], capM[q - 1])
         for q, c in gch:
             lim(g[q], c, 0.0, np.inf); arr[q] = arr.get(q, 0.0) + c
         for q, c in dch:
@@ -576,13 +604,13 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 1000,
             #     effect  : f[k] += t, d[k] += t ;  xm(k-1) -= t ; master slot k unchanged
             #               (carry-in +t, shared +t) ;  xs(k) += a_k*t
             #     equation: m_{k-1} = a_k * s_k
-            #     bounds  : lo: f[k] >= 0, delta_k >= 0, xs(k) >= 0
+            #     bounds  : lo: f[k] >= fL[k] (M1/M6), delta_k >= 0, xs(k) >= 0
             #               hi: f[k] <= capM[k-1] (M2), xm(k-1) >= 0, slave arrival cap
             #     stage 6 : S6/S7 on xs(k) (+a_k t), M5 on d[k]
             if ak > 0 and k >= 1 and tx[k]:
                 xa, xb = xm(k - 1), xs(k)
                 t = step(th1, h[k - 1], xa, 1, th2, hb[k], xb, ak, None, Ts(k))
-                lo = max(-f[k], -d[k], -xb / ak)
+                lo = max(-(f[k] - fL[k]), -d[k], -xb / ak)
                 hi = min(capM[k - 1] - f[k], xa, (W - g[k]) / ak - d[k], capA[k] / ak - d[k])
                 if has_s67: lo, hi = slave_lim(lo, hi, k, xb, ak)
                 if has_m5: hi = min(hi, Dc[k] - d[k])
@@ -593,13 +621,13 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 1000,
             #               xm(k+1) -= t ; xs(k) += a_k*t
             #     equation: m_{k+1} = a_k * s_k
             #     bounds  : lo: delta_k >= 0, xs(k) >= 0, f[k+1] <= capM[k] (when t < 0)
-            #               hi: f[k+1] >= 0 (cannot undo more carry than exists), xm(k+1) >= 0, arrival cap
+            #               hi: f[k+1] >= fL[k+1] (cannot undo carry below the floor), xm(k+1) >= 0, arrival cap
             #     stage 6 : S6/S7 on xs(k) (+a_k t), M5 on d[k]
             if ak > 0 and k <= N - 2 and tx[k]:
                 xa, xb = xm(k + 1), xs(k)
                 t = step(th1, h[k + 1], xa, 1, th2, hb[k], xb, ak, None, Ts(k))
                 lo = max(-d[k], -xb / ak, -(capM[k] - f[k + 1]))
-                hi = min(f[k + 1], xa, (W - g[k]) / ak - d[k], capA[k] / ak - d[k])
+                hi = min(f[k + 1] - fL[k + 1], xa, (W - g[k]) / ak - d[k], capA[k] / ak - d[k])
                 if has_s67: lo, hi = slave_lim(lo, hi, k, xb, ak)
                 if has_m5: hi = min(hi, Dc[k] - d[k])
                 t = min(max(t, lo), hi)
@@ -626,11 +654,11 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 1000,
             # (6) MASTER right tap k -> k+1 : equalise master levels
             #     effect  : f[k+1] += t ; xm(k) -= t ; xm(k+1) += t
             #     equation: nu_k = nu_{k+1}  with nu = P + 1/h  (lambda_k = mu_k = 0)
-            #     bounds  : f >= 0 (closed tap, lambda_k) and f <= capM[k] (full tap, mu_k),
+            #     bounds  : f >= fL (closed tap / master at its floor, lambda_k) and f <= capM[k] (full tap, mu_k),
             #               plus xm(k) >= t and xm(k+1) >= -t (no negative power)
             xa, xb_ = xm(k), xm(k + 1)
             t = step(th1, h[k], xa, 1, th1, h[k + 1], xb_, 1)
-            t = min(max(t, max(-f[k + 1], -xb_)), min(capM[k] - f[k + 1], xa))
+            t = min(max(t, max(-(f[k + 1] - fL[k + 1]), -xb_)), min(capM[k] - f[k + 1], xa))
             f[k + 1] += t; big = max(big, abs(t))
             # (7) SLAVE right tap k -> k+1 : equalise slave levels
             #     effect  : g[k+1] += t ; xs(k) -= t ; xs(k+1) += t
@@ -650,11 +678,11 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 1000,
             # (8) MASTER carry pass-through  M_{k-1} -> M_{k+1} across master slot k
             #     effect  : f[k] += t, f[k+1] += t ; xm(k-1) -= t ; xm(k+1) += t ; xm(k) unchanged
             #     equation: nu_{k-1} = nu_{k+1}  (slot k is dead, so it is skipped over)
-            #     bounds  : both carries in [0, cap], xm(k-1) >= 0, xm(k+1) >= 0
+            #     bounds  : both carries in [fL, cap], xm(k-1) >= 0, xm(k+1) >= 0
             if 1 <= k <= N - 2:
                 xa, xb_ = xm(k - 1), xm(k + 1)
                 t = step(th1, h[k - 1], xa, 1, th1, h[k + 1], xb_, 1)
-                lo = max(-f[k], -f[k + 1], -xb_)
+                lo = max(-(f[k] - fL[k]), -(f[k + 1] - fL[k + 1]), -xb_)
                 hi = min(capM[k - 1] - f[k], capM[k] - f[k + 1], xa)
                 t = min(max(t, lo), hi)
                 f[k] += t; f[k + 1] += t; big = max(big, abs(t))
@@ -716,7 +744,7 @@ def joint_dwf(jp: JointParams, tol: float = 1e-10, max_iter: int = 1000,
 # ----------------------------------------------------------------------------
 # Stage 6: maximal-sharing tie-break (post-pass)
 # ----------------------------------------------------------------------------
-STOP_REASONS = ("ceiling", "S5", "M5", "master")
+STOP_REASONS = ("ceiling", "S5", "M5", "master", "floor")
 
 
 def fullest_trajectory(jp: JointParams, x, tol: float = 1e-12) -> dict:
@@ -724,10 +752,14 @@ def fullest_trajectory(jp: JointParams, x, tol: float = 1e-12) -> dict:
     the slave can take (ceiling S2, S5, M5) and it has (E_k + F_{k-1}); see maximal_sharing for the equations.
     With E_max = inf this trajectory is pointwise the fullest one, so it is also an exact feasibility test:
     fail_slot = first slot where even it falls below B_min (None = feasible).
+    With a master floor (M6, jp.master_floor_J) the master only shares what is above fL[k+1]
+    (stop reason "floor") and the last slot keeps fL[N] instead of spilling it.
     Returns dict(delta, spill, b, b_peak, stop, fail_slot, short_J)."""
     m = jp.master
     N, E, a = m.N, m.E, jp.a
     cS, capA, Dc = jp.overhead, jp.capA, jp.dcap
+    fL = master_floor_profile(jp)
+    has_floor = jp.master_floor_J is not None
     x = np.asarray(x, float)
     delta, spill, b, b_peak = np.zeros(N), np.zeros(N), np.zeros(N), np.zeros(N)
     stop = []
@@ -738,6 +770,9 @@ def fullest_trajectory(jp: JointParams, x, tol: float = 1e-12) -> dict:
         cands = {"ceiling": head / a[k] if a[k] > 0 else 0.0,
                  "S5": capA[k] / a[k] if a[k] > 0 else 0.0,
                  "M5": Dc[k], "master": avail}
+        if has_floor:                                      # M6: keep fL[k+1] for the master itself
+            cands["floor"] = avail - fL[k + 1]
+            del cands["master"]
         reason = min(cands, key=cands.get)
         dk = max(0.0, cands[reason])
         if head <= tol * max(jp.B_max, 1.0):
@@ -750,7 +785,7 @@ def fullest_trajectory(jp: JointParams, x, tol: float = 1e-12) -> dict:
         b[k] = level
         left = avail - dk
         if k == N - 1:
-            spill[k], carry = left, 0.0
+            spill[k], carry = left - fL[N], 0.0           # the master ends holding its reserve fL[N] (0 = off)
         else:
             carry = min(left, m.E_max - E[k + 1])
             spill[k] = left - carry
@@ -771,6 +806,7 @@ def maximal_sharing(jp: JointParams, r: JointResult, tol: float = 1e-12):
             b_k      = b_peak_k - c_k - x_k              (>= B_min: the fullest trajectory dominates the optimum)
             F_k      = E_k + F_{k-1} - delta_k - spill_k,  spill_k = max(0, F_k_unclipped - (E_max - E_{k+1}));
                        F_{N-1} = 0 (what is left in the last slot is spilled)
+            with a master floor (M6): delta_k <= E_k + F_{k-1} - fL[k+1] (stop "floor") and F_{N-1} = fL[N]
 
     "spill" is the master's unused energy (tau*P_i in the result).  The terminal condition g[N] = 0 of the
     solver is dropped: the slave may end above B_min.  If the master's energy cannot keep the fullest trajectory
