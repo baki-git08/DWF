@@ -15,6 +15,12 @@ C_MASTER, C_SLAVE, C_LINK = "#2a78d6", "#eb6834", "#1baf7a"
 INK, INK2, GRID = "#0b0b0b", "#52514e", "#e6e5e0"
 
 
+# Font sizes (points) -- change these to resize axis text and legends in every plot.
+AXIS_FONTSIZE = 20      # axis labels
+TICK_FONTSIZE = 15      # tick numbers
+LEGEND_FONTSIZE = 13    # legend entries
+
+
 BITS_PER_NAT = 1.0 / np.log(2.0)    # the objective is in nats; plots report bits
 EDGE_TOL = 1e-3                     # [J] a battery/carry within this of a bound counts as "at the bound"
 #   (joint_dwf converges to ~1e-6 J, so slots sitting ON a bound land well inside this tolerance)
@@ -22,13 +28,16 @@ EDGE_TOL = 1e-3                     # [J] a battery/carry within this of a bound
 
 def _style(ax):
     """Shared, low-key axis styling."""
+    ax.xaxis.label.set_size(AXIS_FONTSIZE)
+    ax.yaxis.label.set_size(AXIS_FONTSIZE)
+    ax.tick_params(labelsize=TICK_FONTSIZE)
     ax.set_facecolor("white")
     ax.grid(True, axis="y", color=GRID, lw=0.8)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
     for sp in ("left", "bottom"):
         ax.spines[sp].set_color(GRID)
-    ax.tick_params(colors=INK2)
+    ax.tick_params(colors=INK2, labelsize=TICK_FONTSIZE)
 
 
 def _new_axis(figsize=(12.5, 5.0)):
@@ -57,7 +66,7 @@ def _new_axes(nrows=2, figsize=(12.5, 3.7)):
 
 def _legend(ax, loc=None):
     """Legend outside the axes (right) so it never hides data; `loc` kept for call-site compatibility."""
-    ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=8.5,
+    ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=LEGEND_FONTSIZE,
               labelcolor=INK2, borderaxespad=0)
 
 
@@ -73,7 +82,7 @@ def _finish(fig, ax, path, title, suptitle, jp: JointParams | None = None):
     if jp is not None:
         xlabel += f"  (slot length τ = {jp.master.tau:g} s)"
     if not axes[-1].get_xlabel():
-        axes[-1].set_xlabel(xlabel)
+        axes[-1].set_xlabel(xlabel, fontsize=AXIS_FONTSIZE)
     if axes.size == 1:
         axes[0].set_title(title, loc="left", color=INK, fontsize=11)
         if suptitle:
@@ -92,7 +101,7 @@ def _shade_silent(ax, jp: JointParams):
     first = True
     for i in np.flatnonzero(~jp.slave_schedule):
         ax.axvspan(i - 0.5, i + 0.5, color=GRID, alpha=0.6, lw=0, zorder=0,
-                   label="slave silent slot (schedule s_k = 0)" if first else None)
+                   label="silent slot" if first else None)
         first = False
 
 

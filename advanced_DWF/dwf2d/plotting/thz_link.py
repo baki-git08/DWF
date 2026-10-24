@@ -33,10 +33,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from .. import channels as ch
+from .style import AXIS_FONTSIZE, LEGEND_FONTSIZE, TICK_FONTSIZE
 
 # The notebook's rcParams (its config cell); applied per figure so the DWF's own style is not touched.
 NOTEBOOK_RC = {"figure.dpi": 100, "axes.grid": True, "grid.alpha": 0.35,
-               "axes.spines.top": False, "axes.spines.right": False}
+               "axes.spines.top": False, "axes.spines.right": False,
+               # font sizes follow the shared variables in style.py (AXIS_ / TICK_ / LEGEND_FONTSIZE)
+               "axes.labelsize": AXIS_FONTSIZE, "xtick.labelsize": TICK_FONTSIZE, "ytick.labelsize": TICK_FONTSIZE,
+               "legend.fontsize": LEGEND_FONTSIZE, "axes.titlesize": TICK_FONTSIZE, "figure.titlesize": TICK_FONTSIZE}
 SWEEP_ORDER = ["SNR", "Distance", "Data Rate", "Received Power"]
 OP_STYLE = dict(color="tab:purple", ls="-.", lw=1.6)        # DWF operating point marker
 
@@ -74,8 +78,8 @@ class ThzLinkSetup:
     simulate_link: object               # channels.make_link_simulator(...) (carries .PULSE, .DELAY, .sps)
     d_demo_m: dict = field(default_factory=dict)     # D_DEMO_M (solved for demo_target_snr_db when empty)
     alpha: float = ch.ALPHA_THZ                      # ALPHA_THZ
-    dist_sweep_m: np.ndarray = field(default_factory=lambda: np.linspace(0.01, 3.0, 400) * 1e-3)   # DIST_SWEEP_M
-    snr_db_range: np.ndarray = field(default_factory=lambda: np.linspace(0, 30, 300))
+    dist_sweep_m: np.ndarray = field(default_factory=lambda: np.linspace(0.01, 1.75, 400) * 1e-3)   # DIST_SWEEP_M
+    snr_db_range: np.ndarray = field(default_factory=lambda: np.linspace(0, 28, 300))
     p_rec_sweep_dbw: np.ndarray | None = None        # default: noise floor -5 .. +40 dB
     data_rates_sweep: np.ndarray = field(default_factory=lambda: np.logspace(8, 11.3, 200))
     ebn0_validation_db: np.ndarray = field(default_factory=lambda: np.arange(0, 21, 2))
@@ -85,7 +89,7 @@ class ThzLinkSetup:
     gain_study_dbi: list = field(default_factory=lambda: [0, 5, 10, 20, 40])
     eye_schemes: list = field(default_factory=lambda: ["4-QAM", "16-QAM"])
     heatmap_scheme: str = "16-QAM"
-    ber_target: float = 1e-3
+    ber_target: float = 1e-6
     aperture_a_m: float = ch.APERTURE_A_M
     aperture_b_m: float = ch.APERTURE_B_M
     aperture_efficiency: float = ch.APERTURE_EFFICIENCY
@@ -181,8 +185,7 @@ def setup_from_slave_config(seed: int = 42, operating_point: bool = True, pam_bi
         b = S.link_budget(lk["freq_hz"], lk["d_eff"], p_tx_w=lk["eta_tx"] * cfg.P_PM_ELEC_W)
         S.operating_point = dict(freq_label=lk["freq_label"], d_m=lk["d_eff"], snr_db=float(b["snr_db"]),
                                  pr_dbw=float(b["pr_dbw"]),
-                                 label=f"DWF operating point ({lk['preset']}, {lk['d_eff'] * 1e3:.3g} mm, "
-                                       f"{float(b['snr_db']):.1f} dB)")
+                                 label=f"DWF op. point ({float(b['snr_db']):.1f} dB)")
     return S
 
 
@@ -204,7 +207,7 @@ def make_sweeps(S: ThzLinkSetup, fname):
     }
 
 
-def plot_ber_curves(S: ThzLinkSetup, ax, fname, sweep, sweeps=None):
+def plot_ber_curves(S: ThzLinkSetup, ax, fname, sweep, sweeps=None, title=True):
     x, ebn0_fn, xlabel, xscale = (sweeps or make_sweeps(S, fname))[sweep]
     for name, cfg in S.schemes.items():
         ax.plot(x, cfg["ber_func"](ebn0_fn(cfg["bits_per_symbol"])), lw=1.8, ls=S.scheme_ls[name], color=S.scheme_colors[name], label=name)
@@ -216,20 +219,25 @@ def plot_ber_curves(S: ThzLinkSetup, ax, fname, sweep, sweeps=None):
     if op is not None and sweep in ("SNR", "Distance", "Received Power"):
         xv = {"SNR": op["snr_db"], "Distance": op["d_m"] * 1e3, "Received Power": op["pr_dbw"]}[sweep]
         ax.axvline(xv, **OP_STYLE, label=op["label"])
-    ax.set(xscale=xscale, yscale="log", ylim=(1e-6, 1), xlabel=xlabel, ylabel="BER",
-           title=f"{fname}: BER vs {sweep.lower()}")
+    ax.set(xscale=xscale, yscale="log", ylim=(1e-6, 1), xlabel=xlabel, ylabel="BER")
+    if title:
+        ax.set_title(f"{fname}: BER vs {sweep.lower()}")
     ax.grid(True, which="both")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=LEGEND_FONTSIZE)
 
 
-def plot_ber_sweep(S: ThzLinkSetup, sweep: str):
-    """One section-7 figure: BER vs `sweep` (one of SWEEP_ORDER), one column per carrier frequency."""
+def plot_ber_sweep(S: ThzLinkSetup, sweep: str, only: str | None = None, titles: bool = True):
+    """One section-7 figure: BER vs `sweep` (one of SWEEP_ORDER), one column per carrier frequency
+    (or a single panel when `only` names one carrier, e.g. "0.3 THz")."""
+    names = [only] if only else list(S.freqs_hz)
     with plt.rc_context(NOTEBOOK_RC):
-        fig, axes = plt.subplots(1, len(S.freqs_hz), figsize=(6.5 * len(S.freqs_hz), 4.6), sharey=True)
-        for ax, fname in zip(axes, S.freqs_hz):
-            plot_ber_curves(S, ax, fname, sweep)
-        fig.suptitle(f"BER vs {sweep.lower()}   (Pt = {S.pt_w*1e3:.0f} mW, {S.gain_label()})",
-                     fontweight="bold")
+        fig, axes = plt.subplots(1, len(names), figsize=(6.5 * len(names) + (3.5 if only else 0), 4.6), sharey=True, squeeze=False)
+        for ax, fname in zip(axes[0], names):
+            plot_ber_curves(S, ax, fname, sweep, title=titles)
+        gl = (f"G_tx = {S.gains(only)[0]:g} dBi, G_rx = {S.gains(only)[1]:g} dBi" if only else S.gain_label())
+        if titles:
+            fig.suptitle(f"BER vs {sweep.lower()}   (Pt = {S.pt_w*1e3:.0f} mW, {gl})", fontweight="bold",
+                         fontsize=TICK_FONTSIZE if only else None)
         plt.tight_layout()
     return fig
 
@@ -256,12 +264,12 @@ def plot_link_characteristics(S: ThzLinkSetup):
             if op is not None:
                 ax.axvline(op["d_m"] * 1e3, **OP_STYLE, label=op["label"])
         ax.axhline(0, color="k", lw=0.8)
-        ax.set(xlabel="Distance (mm)", ylabel="Coupling loss (dB)  [negative: Pr > Pt]",
+        ax.set(xlabel="Distance (mm)", ylabel="Coupling loss (dB)",
                title="Coupling loss and received power\n(shaded: Friis not valid)")
         pt_dbw = S.pt_dbw
         sec = ax.secondary_yaxis("right", functions=(lambda pl: pt_dbw - pl, lambda pr: pt_dbw - pr))
         sec.set_ylabel("Received power (dBW)")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=LEGEND_FONTSIZE, loc="upper left")
 
         # (2) loss components
         ax = axes[1]
@@ -278,7 +286,7 @@ def plot_link_characteristics(S: ThzLinkSetup):
             for fname, g_sum in g_sums.items():
                 ax.axhline(g_sum, color=freq_col[fname], ls="--", lw=1.8, label=f"G_tx + G_rx = {g_sum:g} dB ({fname})")
         ax.set(xlabel="Distance (mm)", ylabel="Loss / gain (dB)", title="Where the dB go: spreading vs absorption vs gain")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=LEGEND_FONTSIZE)
 
         # (3) Shannon limit
         ax = axes[2]
@@ -288,7 +296,7 @@ def plot_link_characteristics(S: ThzLinkSetup):
             ax.axhline(S.r_s * cfg["bits_per_symbol"] / 1e9, color=S.scheme_colors[name], ls=":", lw=1.5,
                        label=f"{name}: {S.r_s * cfg['bits_per_symbol'] / 1e9:g} Gbps")
         ax.set(xlabel="Es/N0 (dB)", ylabel="Data rate (Gbps)", title="Shannon limit vs SNR")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=LEGEND_FONTSIZE)
 
         plt.tight_layout()
     return fig
@@ -317,13 +325,13 @@ def plot_constellations(S: ThzLinkSetup, demo_results: dict):
                 res = demo_results[(fname, name)]
                 ax.scatter(res["rx_sym"].real, res["rx_sym"].imag, s=1.5, alpha=0.45, color=S.scheme_colors[name])
                 ax.scatter(cfg["points"].real, cfg["points"].imag, color="red", marker="x", s=40, linewidths=1.6, label="ideal")
-                ax.set_title(f"{fname}: {name}\n{res['snr_db']:.1f} dB @ {S.d_demo_m[fname]*1e3:.2f} mm, sim BER = {res['ber']:.2e}", fontsize=9)
+                ax.set_title(f"{fname}: {name}\n{res['snr_db']:.1f} dB @ {S.d_demo_m[fname]*1e3:.2f} mm, sim BER = {res['ber']:.2e}", fontsize=TICK_FONTSIZE)
                 if cfg["is_one_dim"]:
                     ax.set_ylim(-0.5, 0.5)
                 else:
                     ax.set_aspect("equal", "box")
                 if r == 0 and c == 0:
-                    ax.legend(loc="upper right", fontsize=7)
+                    ax.legend(loc="upper right", fontsize=LEGEND_FONTSIZE)
         plt.tight_layout()
     return fig
 
@@ -381,7 +389,7 @@ def plot_sim_vs_theory(S: ThzLinkSetup, validation: dict):
                     mfc="none" if name == S.pam_name else None, label=f"{name} (sim)")
         ax.set(yscale="log", ylim=(1e-6, 1), xlabel="Eb/N0 (dB)", ylabel="BER", title="Simulation vs theory (all schemes)")
         ax.grid(True, which="both")
-        ax.legend(fontsize=8, ncol=2)
+        ax.legend(fontsize=LEGEND_FONTSIZE, ncol=2)
         plt.tight_layout()
     return fig
 
@@ -401,20 +409,20 @@ def plot_gain_vs_aperture(S: ThzLinkSetup):
             axes[0].plot(areas_mm2, g, lw=2, label=f"{fname} (lambda = {lam*1e3:g} mm)")
             axes[0].plot(S.aperture_a_m * S.aperture_b_m * 1e6, ga(f), "o", ms=8, color="k")
             axes[0].annotate(f"{ga(f):.1f} dBi", (S.aperture_a_m * S.aperture_b_m * 1e6, ga(f)),
-                             textcoords="offset points", xytext=(-48, 6), fontsize=9)
+                             textcoords="offset points", xytext=(-48, 6), fontsize=TICK_FONTSIZE)
         for g_val in S.gain_study_dbi:
             axes[0].axhline(g_val, color="grey", lw=0.7, ls=":")
         axes[0].set(xscale="log", xlabel="Aperture area (mm$^2$)", ylabel="Gain (dBi)",
                     title=f"Aperture gain (eta = {S.aperture_efficiency}); dot = 2 cm x 1.5 cm horn")
-        axes[0].legend()
+        axes[0].legend(fontsize=LEGEND_FONTSIZE)
 
         for fname, f in S.freqs_hz.items():
             gs = np.arange(0, 41)
             axes[1].plot(gs, ch.near_field_limit_m(f, gs, gs) * 1e3, lw=2, label=f"{fname}")
-        axes[1].axhspan(0, 2, color="tab:green", alpha=0.12, label="usable link range (about 0 to 2 mm)")
+        axes[1].axhspan(0, 2, color="tab:green", alpha=0.12, label="usable range")
         axes[1].set(yscale="log", xlabel="Gain at each end (dBi)", ylabel="Friis-valid beyond (mm)",
                     title="Distance beyond which the Friis budget is consistent")
-        axes[1].legend()
+        axes[1].legend(fontsize=LEGEND_FONTSIZE)
         plt.tight_layout()
     return fig
 
@@ -447,8 +455,8 @@ def plot_snr_power_vs_distance(S: ThzLinkSetup):
             if op is not None:
                 axes[0, c].plot(op["d_m"] * 1e3, op["snr_db"], marker="*", ms=14, color=OP_STYLE["color"], ls="none", label=op["label"])
                 axes[1, c].plot(op["d_m"] * 1e3, op["pr_dbw"], marker="*", ms=14, color=OP_STYLE["color"], ls="none", label=op["label"])
-            axes[0, c].legend(fontsize=8)
-            axes[1, c].legend(fontsize=8)
+            axes[0, c].legend(fontsize=LEGEND_FONTSIZE)
+            axes[1, c].legend(fontsize=LEGEND_FONTSIZE)
         plt.tight_layout()
     return fig
 
@@ -474,10 +482,11 @@ def plot_ber_vs_distance_gains(S: ThzLinkSetup):
                 if r == len(S.freqs_hz) - 1: ax.set_xlabel("Distance (mm)")
                 if c == 0: ax.set_ylabel("BER")
                 ax.grid(True, which="both")
-        axes[0, 0].legend(fontsize=7)
+                ax.xaxis.set_major_locator(plt.MaxNLocator(4))     # big tick labels: keep them from colliding
+        axes[0, 0].legend(fontsize=LEGEND_FONTSIZE)
         if S.operating_point is not None:
             r_op = list(S.freqs_hz).index(S.operating_point["freq_label"])
-            axes[r_op, 0].legend(fontsize=7)
+            axes[r_op, 0].legend(fontsize=LEGEND_FONTSIZE)
         fig.suptitle("BER vs distance for different antenna gains (grey = Friis not valid, dotted = BER target)", fontweight="bold")
         plt.tight_layout()
     return fig
@@ -494,11 +503,11 @@ def plot_max_range_vs_gain(S: ThzLinkSetup):
                 ax.plot(GAIN_GRID_DBI, r_mm, S.scheme_mark[name], ls=S.scheme_ls[name], ms=3.5, lw=1.8, color=S.scheme_colors[name], label=name)
             d_nf = ch.near_field_limit_m(f, GAIN_GRID_DBI, GAIN_GRID_DBI) * 1e3
             ax.plot(GAIN_GRID_DBI, d_nf, "k:", lw=2, label="Friis-valid limit")
-            ax.fill_between(GAIN_GRID_DBI, 1e-3, d_nf, color="grey", alpha=0.2, label="Friis not valid (below limit)")
+            ax.fill_between(GAIN_GRID_DBI, 1e-3, d_nf, color="grey", alpha=0.2, label="Friis not valid")
             ax.set(yscale="log", ylim=(1e-1, 1e2), xlabel="Antenna gain at each end (dBi)", ylabel=f"Max range at BER {S.ber_target:g} (mm)",
                    title=f"{fname}: maximum range vs gain\n(a curve below the dotted line is not physical)")
             ax.grid(True, which="both")
-            ax.legend(fontsize=8)
+            ax.legend(fontsize=LEGEND_FONTSIZE)
         plt.tight_layout()
     return fig
 
@@ -524,6 +533,83 @@ def plot_max_range_heatmap(S: ThzLinkSetup):
     return fig
 
 
+
+# ----------------------------------------------------------------------------
+# Stand-alone single-carrier figures (default 0.3 THz, the DWF operating carrier)
+# ----------------------------------------------------------------------------
+def _single_axis(figsize=(9.5, 5.2)):
+    fig, ax = plt.subplots(figsize=figsize)
+    return fig, ax
+
+
+def _mark_op(S: ThzLinkSetup, ax, fname, yval=None):
+    """Vertical DWF operating-distance line (and a star at yval) when the operating point belongs to `fname`."""
+    op = S._op(fname)
+    if op is None:
+        return
+    ax.axvline(op["d_m"] * 1e3, **OP_STYLE, label=op["label"])
+
+
+def plot_snr_vs_distance(S: ThzLinkSetup, fname: str = "0.3 THz"):
+    """SNR (Es/N0) vs distance for one carrier at its operating gains; dashed where Friis is not valid."""
+    with plt.rc_context(NOTEBOOK_RC):
+        fig, ax = _single_axis()
+        f = S.freqs_hz[fname]
+        x_mm = S.dist_sweep_m * 1e3
+        b = S.link_budget(f, S.dist_sweep_m)
+        d_nf = float(ch.near_field_limit_m(f, *S.gains(fname))) * 1e3
+        plot_validity(ax, x_mm, b["snr_db"], d_nf, "tab:red", f"{fname}, {S.gains(fname)[0]:g}/{S.gains(fname)[1]:g} dBi")
+        ax.axhline(0, color="k", ls=":", lw=1)
+        _mark_op(S, ax, fname)
+        ax.set(xlabel="Distance (mm)", ylabel="Es/N0 (dB)")
+        ax.legend(fontsize=LEGEND_FONTSIZE)
+        plt.tight_layout()
+    return fig
+
+
+def plot_throughput_vs_distance(S: ThzLinkSetup, fname: str = "0.3 THz"):
+    """Achievable data rate vs distance for one carrier: Shannon limit R_s log2(1 + SNR(d)) and the fixed rate of each
+    scheme (R_s x bits/symbol) wherever the theoretical BER at that distance meets the BER target."""
+    with plt.rc_context(NOTEBOOK_RC):
+        fig, ax = _single_axis()
+        f = S.freqs_hz[fname]
+        x_mm = S.dist_sweep_m * 1e3
+        snr = S.link_budget(f, S.dist_sweep_m)["snr"]
+        ax.plot(x_mm, S.r_s * np.log2(1 + snr) / 1e9, color="black", lw=2, label=f"Shannon limit, B = {S.r_s/1e9:g} GHz")
+        g_tx, g_rx = S.gains(fname)
+        for name, cfg in S.schemes.items():
+            rate = S.r_s * cfg["bits_per_symbol"] / 1e9
+            ok = S.ber_at(f, cfg, S.dist_sweep_m, g_tx, g_rx) <= S.ber_target
+            ax.plot(x_mm[ok], np.full(ok.sum(), rate), color=S.scheme_colors[name], ls=S.scheme_ls[name], lw=2.2,
+                    label=f"{name}: {rate:g} Gbps")
+        _mark_op(S, ax, fname)
+        ax.set(xlabel="Distance (mm)", ylabel="Data rate (Gbps)")
+        ax.legend(fontsize=LEGEND_FONTSIZE)
+        plt.tight_layout()
+    return fig
+
+
+def plot_channel_loss_vs_distance(S: ThzLinkSetup, fname: str = "0.3 THz"):
+    """Channel loss vs distance for one carrier: free-space spreading, molecular absorption, their sum, the antenna
+    gain G_tx + G_rx, and the resulting coupling loss (path loss minus gain)."""
+    with plt.rc_context(NOTEBOOK_RC):
+        fig, ax = _single_axis()
+        f = S.freqs_hz[fname]
+        x_mm = S.dist_sweep_m * 1e3
+        b = S.link_budget(f, S.dist_sweep_m)
+        ax.plot(x_mm, b["fspl_db"], color="tab:blue", lw=2, label="free-space spreading")
+        ax.plot(x_mm, b["absorption_db"], color="k", lw=2, label="absorption")
+        ax.plot(x_mm, b["fspl_db"] + b["absorption_db"], color="tab:red", lw=2, label="total path loss")
+        ax.axhline(sum(S.gains(fname)), color="tab:green", ls="--", lw=1.8, label=f"G_tx + G_rx = {sum(S.gains(fname)):g} dB")
+        ax.plot(x_mm, b["coupling_loss_db"], color="tab:purple", ls="-.", lw=2, label="coupling loss")
+        ax.axhline(0, color="k", lw=0.8)
+        _mark_op(S, ax, fname)
+        ax.set(xlabel="Distance (mm)", ylabel="Loss / gain (dB)")
+        ax.legend(fontsize=LEGEND_FONTSIZE)
+        plt.tight_layout()
+    return fig
+
+
 # ----------------------------------------------------------------------------
 # All figures
 # ----------------------------------------------------------------------------
@@ -534,7 +620,7 @@ THZ_LINK_FILES = ("ber_vs_snr.png", "ber_vs_distance.png", "ber_vs_data_rate.png
 
 
 def write_thz_link_plots(S: ThzLinkSetup, outdir: str, dpi: int = 100) -> list[str]:
-    """Save the 13 THz-link figures of the notebook (sections 7-12) as PNGs in outdir, in the notebook's order
+    """Save the 13 THz-link figures (plus the six stand-alone 0.3 THz plots) of the notebook (sections 7-12) as PNGs in outdir, in the notebook's order
     (the Monte-Carlo figures draw from S.simulate_link's rng in the same order as the notebook).  Returns the paths."""
     os.makedirs(outdir, exist_ok=True)
     paths = []
@@ -547,6 +633,13 @@ def write_thz_link_plots(S: ThzLinkSetup, outdir: str, dpi: int = 100) -> list[s
 
     for sweep, name in zip(SWEEP_ORDER, THZ_LINK_FILES[:4]):
         save(plot_ber_sweep(S, sweep), name)
+    if "0.3 THz" in S.freqs_hz:                 # stand-alone 0.3 THz versions (the DWF operating carrier)
+        save(plot_ber_sweep(S, "Distance", only="0.3 THz"), "ber_vs_distance_0p3THz.png")
+        save(plot_ber_sweep(S, "Data Rate", only="0.3 THz"), "ber_vs_data_rate_0p3THz.png")
+        save(plot_ber_sweep(S, "SNR", only="0.3 THz", titles=False), "ber_vs_snr_0p3THz.png")
+        save(plot_snr_vs_distance(S), "snr_vs_distance_0p3THz.png")
+        save(plot_throughput_vs_distance(S), "throughput_vs_distance_0p3THz.png")
+        save(plot_channel_loss_vs_distance(S), "channel_loss_vs_distance_0p3THz.png")
     save(plot_link_characteristics(S), "link_characteristics.png")
     demo_results = simulate_demo(S)
     save(plot_constellations(S, demo_results), "constellations.png")
@@ -572,7 +665,7 @@ def _dbm(p_w):
 def plot_received_power_vs_distance(jp, r, link: dict, path: str, title: str = ""):
     """Received power vs distance for the two links of the integrated scenario (one PNG, two panels).
 
-    Left, optical energy link (UOWC, master laser -> slave PV), distance 0.1 mm .. 100 m:
+    Optical energy link (UOWC, master laser -> slave PV), distance 0.1 mm .. 100 m:
         P_rx(d)     = (delta/tau) * uowc_alpha(d, c, eta_ld, geom) optical power at the PV  (ETA_LD exp(-c d) UOWC_GEOM)
         P_stored(d) = beta * P_rx(d)                              electrical power into the supercap
         delta/tau is taken from the DWF solution r (peak and mean over the slots that share).
@@ -583,81 +676,69 @@ def plot_received_power_vs_distance(jp, r, link: dict, path: str, title: str = "
     """
     import slave_config as cfg
     from scipy.optimize import brentq
-    from .style import C_LINK, C_SLAVE, GRID, INK, INK2, _style
-
-    def legend_below(ax):
-        ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(0.0, -0.16), fontsize=8.5, labelcolor=INK2,
-                  borderaxespad=0)
+    from .style import AXIS_FONTSIZE, TICK_FONTSIZE, C_LINK, C_SLAVE, GRID, INK, INK2, _style
 
     tau = jp.master.tau
-    fig, (axo, axt) = plt.subplots(1, 2, figsize=(15.5, 7.4), facecolor="white")
-    for ax in (axo, axt):
-        _style(ax)
+    fig, ax = plt.subplots(figsize=(12.5, 6.0), facecolor="white")
+    _style(ax)
+    ax.grid(True, axis="both", color=GRID, lw=1)
+    axt = ax.twiny()                                                    # THz link: its own x-axis (top)
+    axt.tick_params(colors=INK2, labelsize=TICK_FONTSIZE)
+    for sp in ("left", "right"):
+        axt.spines[sp].set_visible(False)
+    axt.spines["top"].set_color(GRID)
 
-    # ---- optical energy link -------------------------------------------------------------------
-    d_o = np.logspace(-4, 2, 400)                                       # 0.1 mm .. 100 m
+    # ---- optical energy link: peak received power only (distance in m, bottom axis) ----------------------
+    d_o = np.linspace(0.0, 20.0, 400)                                  # 0 .. 100 m
     alpha_d = ch.uowc_alpha(d_o, cfg.UOWC_C_PER_M, cfg.ETA_LD, cfg.UOWC_GEOM)
     sent = np.asarray(r.delta, float) / tau                             # master electrical sharing power [W]
     on = sent > 1e-12 * max(sent.max(), 1e-300)
-    beta = float(np.mean(jp.beta[on])) if on.any() else float(np.mean(jp.beta))
     if on.any():
-        for p_tx, ls, name in ((sent[on].max(), "-", "peak"), (sent[on].mean(), "-.", "mean")):
-            axo.plot(d_o, _dbm(p_tx * alpha_d), color=C_LINK, lw=2, ls=ls,
-                     label=f"optical at the PV, {name} slot ({p_tx * 1e3:.3g} mW sent)")
-            axo.plot(d_o, _dbm(beta * p_tx * alpha_d), color=C_LINK, lw=1.2, ls=":" if name == "peak" else (0, (1, 3)),
-                     label=f"stored after PV/MPPT/supercap (x beta {beta:.3f}), {name} slot")
+        p_tx = sent[on].max()
+        ax.plot(d_o, _dbm(p_tx * alpha_d), color=C_LINK, lw=4, label="optical link, peak")
         d_op = cfg.D_UOWC_M
-        p_op = sent[on].max() * float(ch.uowc_alpha(d_op, cfg.UOWC_C_PER_M, cfg.ETA_LD, cfg.UOWC_GEOM))
-        axo.axvline(d_op, color=INK, lw=1, ls="--")
-        axo.plot(d_op, _dbm(p_op), "o", color=INK, ms=6,
-                 label=f"DWF operating point: D_UOWC_M = {d_op:g} m, {_dbm(p_op):.2f} dBm (peak)")
-    else:
-        axo.text(0.5, 0.5, "the master shares nothing in this solution", transform=axo.transAxes, ha="center", color=INK2)
-    axo.set_xscale("log")
-    axo.set_xlabel("master - slave distance [m]  (log scale)")
-    axo.set_ylabel("received power [dBm]")
-    axo.axvspan(1.0, 5.0, color=GRID, alpha=0.35, lw=0, label="design range of the energy link, 1 - 5 m")
-    axo.set_title(f"Optical energy link (UOWC): c = {cfg.UOWC_C_PER_M:g} 1/m, ETA_LD = {cfg.ETA_LD:g}, "
-                  f"beam capture UOWC_GEOM = {cfg.UOWC_GEOM:g}",
-                  loc="left", color=INK2, fontsize=10)
-    axo.text(0.01, 0.02, f"Beer-Lambert x UOWC_GEOM = {cfg.UOWC_GEOM:g} (no beam-spreading model): "
-             "optimistic at metres while UOWC_GEOM = 1",
-             transform=axo.transAxes, fontsize=8, color=INK2)
-    legend_below(axo)
+        p_op = p_tx * float(ch.uowc_alpha(d_op, cfg.UOWC_C_PER_M, cfg.ETA_LD, cfg.UOWC_GEOM))
+        ax.plot(d_op, _dbm(p_op), "o", color=C_LINK, mec=INK, ms=14, label=f"optical op. point, {d_op:g} m")
 
-    # ---- THz data link -----------------------------------------------------------------------
-    d_t = np.linspace(0.01, 3.0, 400) * 1e-3
+    # ---- THz data link ----------------------------------------------------------------------
+    d_t = np.linspace(0.01, 1.5, 300) * 1e-3
     p_rad = link["eta_tx"] * cfg.P_PM_ELEC_W                             # radiated at the photomixer cap [W]
     n_w = link["noise_w"]
     tones = {"0.1 THz": "#7fb8e0", "0.3 THz": C_SLAVE}
     for label, f in cfg.THZ_FREQS_HZ.items():
+        if abs(f - link["freq_hz"]) > 1e-6 * f:          # only the frequency of the DWF operating point
+            continue
         g_tx, g_rx = ch.LEGACY_GAIN_DBI if cfg.LEGACY_GAINS else tuple(cfg.GAIN_DBI_BY_FREQ[label])
         b = ch.link_budget(f, d_t, g_tx, g_rx, p_rad, n_w, alpha=cfg.ALPHA_THZ)
         pr = b["pr_dbw"] + 30
         d_nf = float(ch.near_field_limit_m(f, g_tx, g_rx))
         valid = d_t >= d_nf
         col = tones.get(label, C_SLAVE)
-        axt.plot(d_t[~valid] * 1e3, pr[~valid], color=col, lw=1.4, ls="--", alpha=0.8)
-        axt.plot(d_t[valid] * 1e3, pr[valid], color=col, lw=2,
-                 label=f"{label}, {g_tx:g}/{g_rx:g} dBi (dashed: Friis not valid, d < {d_nf * 1e3:.2f} mm)")
-    axt.axhline(_dbm(n_w), color=GRID, lw=1.2, ls=":", label=f"noise floor N = {_dbm(n_w):.1f} dBm")
+        axt.plot(d_t[~valid] * 1e3, pr[~valid], color=col, lw=4, ls="--", alpha=0.8)
+        axt.plot(d_t[valid] * 1e3, pr[valid], color=col, lw=6, label=f"THz {label}, {g_tx:g}/{g_rx:g} dBi")
+    ax.axhline(_dbm(n_w), color=INK2, lw=2.4, ls=":", label="noise floor")
     sch = ch.qam_scheme(cfg.MODULATION)
     k = sch["bits_per_symbol"]
     snr_req_db = brentq(lambda x: float(sch["ber_func"](10 ** (x / 10) / k)) - cfg.BER_TARGET, -10.0, 60.0)
-    axt.axhline(_dbm(n_w) + snr_req_db, color=INK2, lw=1.2, ls="-.",
-                label=f"needed for BER {cfg.BER_TARGET:g} ({cfg.MODULATION}): {_dbm(n_w) + snr_req_db:.1f} dBm")
+    ax.axhline(_dbm(n_w) + snr_req_db, color=INK2, lw=2.4, ls="-.", label=f"needed for BER {cfg.BER_TARGET:g}")
     b_op = ch.link_budget(link["freq_hz"], link["d_eff"], link["g_tx_dbi"], link["g_rx_dbi"], p_rad, n_w, alpha=cfg.ALPHA_THZ)
     pr_op = float(b_op["pr_dbw"]) + 30
-    axt.axvline(link["d_eff"] * 1e3, color=INK, lw=1, ls="--")
-    axt.plot(link["d_eff"] * 1e3, pr_op, "o", color=INK, ms=6,
-             label=f"DWF operating point: {link['preset']}, D_THZ_M = {link['d_eff'] * 1e3:g} mm, {pr_op:.1f} dBm "
-                   f"(SNR {pr_op - _dbm(n_w):.1f} dB)")
-    axt.set_ylim(_dbm(n_w) - 60, _dbm(p_rad) + 30)
-    axt.set_xlabel("slave - receiver distance [mm]")
-    axt.set_ylabel("received power [dBm]")
-    axt.set_title(f"THz data link: {p_rad * 1e3:g} mW radiated (photomixer cap), {_dbm(p_rad):.1f} dBm",
-                  loc="left", color=INK2, fontsize=10)
-    legend_below(axt)
+    axt.plot(link["d_eff"] * 1e3, pr_op, "s", color=C_SLAVE, mec=INK, ms=14, label=f"THz op. point, {link['d_eff'] * 1e3:g} mm")
+
+    ax.set_xlim(0, 20)
+    axt.set_xlim(0, 1.5)
+    ax.set_xlabel("optical link distance [m]", fontsize=AXIS_FONTSIZE, color="black")
+    axt.set_xlabel("THz link distance [mm]", fontsize=AXIS_FONTSIZE, color="black")
+    axt.set_ylim(ax.get_ylim())
+    ax.set_ylabel("received power [dBm]", fontsize=AXIS_FONTSIZE)
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = axt.get_legend_handles_labels()
+    ax.set_ylim(top=ax.get_ylim()[1] + 0.12 * (ax.get_ylim()[1] - ax.get_ylim()[0]))   # headroom: legend above the optical line
+    axt.set_ylim(ax.get_ylim())
+    ax.legend(h1 + h2, l1 + l2, frameon=True, framealpha=0.9, facecolor="white", edgecolor=GRID, loc="upper right", ncol=2,
+              fontsize=LEGEND_FONTSIZE, labelcolor=INK2)
+    ax.set_zorder(axt.get_zorder() + 1)                                 # keep the legend above the twin axis
+    ax.patch.set_visible(False)
 
     head = "Received power vs distance: optical energy link and THz data link" + (f"\n{title}" if title else "")
     fig.suptitle(head, x=0.01, ha="left", color=INK, fontsize=12)

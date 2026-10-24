@@ -1,13 +1,13 @@
 {
- "plot_cumulative_energy.png": "b2467e670af268cf6a0a1c6bf6b59cd6a478b55fc58d4370de4943b1c04ee641",
- "plot_harvested_energy.png": "01ab20f9dd4921f9efb4e0593a2febf109b8f51f7c5c970624926e831a473ae3",
- "plot_link_power.png": "64254099958702f1b71f61201e1c2a4c01e39ea63079830b8d151890995f41b9",
- "plot_loss_histogram.png": "d3cd57eb356e451d64a0a1063d70c8d2ca7c9a223441a70420cc6cae11626391",
- "plot_physical_slave_battery.png": "0c17ccf76432ea62131c7549da4018397b3567ce1b2381546f22461af9d94b52",
- "plot_physical_stored_power.png": "d7babbae4b5ccaa33296575d0d3987280e7464cc183c90009e3b956c5e391167",
- "plot_sharing_energy.png": "59e2328b8d595349af5ecd835f1f422087cda697af2152327b6ce31530316fdd",
- "plot_slave_battery.png": "57a062120bc3d63ba284e7a6f4e7a651c8aa966c8cdffe3fb82f931c8009c976",
- "plot_throughput_cumulative.png": "2e3ce68b3003a747b3bb57b02db38b3879fb8a86e432b61c9b325bdfe3ddb10e",
- "plot_throughput_per_slot.png": "98d6f25126ff8733039967e5f6357481ec4fbb9d06f00f16c7ecb47d5242433d",
- "plot_transmit_power.png": "3f472d07053ab54b80314bfee14d7b942ffcf52492249d570411eaade4a50e27"
+ "plot_cumulative_energy.png": "0c58ff8204de7e2cd24eff7624021b072e865a46fa14e52a57fd2f4e2ee70bbe",
+ "plot_harvested_energy.png": "63465bdcbea9846aa026fcaa599b32e11c61bd11ba53cf3825e1f06553aa4cf8",
+ "plot_link_power.png": "473573360fdad1ec4389f742b8e8337a4d677c410df08d8ffc6f22f6060b0f04",
+ "plot_loss_histogram.png": "f073e18fa774442f13a32947ad82276eeac5624a44945050d36cdc751ea835b0",
+ "plot_physical_slave_battery.png": "1820d5c1bd006b35479cde7aca028e80dd1a09261d7616959ac10c28e0b5cb05",
+ "plot_physical_stored_power.png": "fa983eaaa9255e53eb954a2aac219de5b1d9e32d05fdb5f3fa92986ad68689c7",
+ "plot_sharing_energy.png": "55d125d9f6783e1778a815d8fe871a1c8aee3c6b2be6231acc21574eb4a68658",
+ "plot_slave_battery.png": "e5acdf4e268c5dd0a6bca7b23ff57085f9a0f612dda4acb23064504becdcbf12",
+ "plot_throughput_cumulative.png": "4627d7ee424b6b8462bcf5bbdb6fd45194417b3fd0604d57a789557a166a353b",
+ "plot_throughput_per_slot.png": "2193ea62afe2b18a282147eac72e2da4343986332e987e64fbbdd38d6acdcb7c",
+ "plot_transmit_power.png": "8688b1fbc302d79dcc45a16dd9f33d089ad8c113270f4e91c7581e8a1d10dd36"
 }

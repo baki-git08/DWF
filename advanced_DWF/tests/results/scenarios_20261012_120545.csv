@@ -1,0 +1,2 @@
+scenario_id,case,overrides,t_total_s,t_solve_s,t_other_s,n_passes,converged,iterations,objective,energy_shared_stored_J,energy_sent_J,master_final_level_J,slave_final_level_J,events_released,events_run,events_rescheduled,events_dropped,ledger_error_master_J,ledger_error_slave_J,status,reason,redesign_hint
+3.1,inf master battery,"{""E_max"": Infinity}",0.002288899995619431,0.0,0.002288899995619431,0,,,,,,,,,,,,,,ERROR,AttributeError: module 'dwf2d.plotting.physical' has no attribute 'solve_with_physical_chain',

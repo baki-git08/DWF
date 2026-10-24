@@ -18,3 +18,6 @@ from .physical import physical_stored_power, PhysicalStorageResult, solve_with_p
 from .verification import check_kkt_joint, reference_solution_joint
 from .plotting import *  # noqa: F403  (the plot_* functions)
 from .demos import legacy_demo, physical_demo
+
+
+# claude --resume c6463b24-bd91-4096-8ee0-1d0ea317641b

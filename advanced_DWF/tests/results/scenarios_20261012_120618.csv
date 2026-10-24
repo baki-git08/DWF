@@ -1,0 +1,2 @@
+scenario_id,case,overrides,t_total_s,t_solve_s,t_other_s,n_passes,converged,iterations,objective,energy_shared_stored_J,energy_sent_J,master_final_level_J,slave_final_level_J,events_released,events_run,events_rescheduled,events_dropped,ledger_error_master_J,ledger_error_slave_J,status,reason,redesign_hint
+3.1,inf master battery,"{""E_max"": Infinity}",5.382504099994549,5.375622499981546,0.006881600013002753,4,True,2,0.24404019574350744,1.8350920666946706,1433.5195178481754,226199.4366325408,0.6194775999999996,14,2,2,12,2.9103830456733704e-11,2.3314683517128287e-15,PASS,,

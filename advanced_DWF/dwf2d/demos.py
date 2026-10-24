@@ -12,7 +12,7 @@ from .params import JointParams
 from .physical import solve_with_physical_chain
 from .verification import check_kkt_joint
 from .plotting.joint import (
-    plot_cumulative_energy, plot_harvested_energy, plot_link_power, plot_master_battery, plot_sharing_energy,
+    plot_cumulative_energy, plot_dwf_allocation, plot_harvested_energy, plot_link_power, plot_master_battery, plot_sharing_energy,
     plot_slave_battery, plot_throughput_cumulative, plot_throughput_per_slot, plot_transmit_power,
 )
 from .plotting.physical import plot_loss_histogram, plot_physical_slave_battery, plot_physical_stored_power
@@ -95,6 +95,7 @@ def _run_demo(jp0: JointParams, outdir: str = ".", load: dict | None = None):
     plot_harvested_energy(jp, r, out("plot_harvested_energy.png"), caption)
     plot_sharing_energy(jp, r, out("plot_sharing_energy.png"), caption)
     plot_cumulative_energy(jp, r, out("plot_cumulative_energy.png"), caption)
+    plot_dwf_allocation(jp, r, out("plot_dwf_allocation.png"), caption)
     plot_physical_stored_power(jp, r, ph, out("plot_physical_stored_power.png"), caption)
     plot_physical_slave_battery(jp, r, ph, out("plot_physical_slave_battery.png"), caption)
     plot_loss_histogram(jp, r, ph, out("plot_loss_histogram.png"), caption)
@@ -217,6 +218,7 @@ def integrated_demo(outdir: str = "out_integrated_demo", preset: str | None = No
     plot_harvested_energy(jp, r_rep, out("plot_harvested_energy.png"), cap)
     plot_sharing_energy(jp, r_rep, out("plot_sharing_energy.png"), cap)
     plot_cumulative_energy(jp, r_rep, out("plot_cumulative_energy.png"), cap)
+    plot_dwf_allocation(jp, r_rep, out("plot_dwf_allocation.png"), cap)
     plot_physical_stored_power(jp, r_rep, ph_rep, out("plot_physical_stored_power.png"), cap)
     plot_physical_slave_battery(jp, r_rep, ph_rep, out("plot_physical_slave_battery.png"), cap)
     plot_slave_load_per_slot(jp, r_rep, load, out("plot_slave_load_per_slot.png"), cap)

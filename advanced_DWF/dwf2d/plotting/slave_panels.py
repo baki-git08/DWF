@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..params import JointParams, JointResult
-from .style import C_LINK, C_MASTER, C_SLAVE, GRID, INK, INK2, _finish, _legend, _new_axes, _new_axis, _shade_silent
+from .style import AXIS_FONTSIZE, LEGEND_FONTSIZE, C_LINK, C_MASTER, C_SLAVE, GRID, INK, INK2, _finish, _legend, _new_axes, _new_axis, _shade_silent
 
 
 # ----------------------------------------------------------------------------
@@ -14,10 +14,10 @@ from .style import C_LINK, C_MASTER, C_SLAVE, GRID, INK, INK2, _finish, _legend,
 # ----------------------------------------------------------------------------
 C_MCU, C_MEM, C_MPPT = "#8a5cd6", "#c9a227", "#d6457a"
 LOAD_COLORS = {"camera": C_MASTER, "mcu": C_MCU, "flash": C_MEM, "mppt": C_MPPT, "tx": C_SLAVE}
-LOAD_LABELS = {"camera": "camera", "mcu": "MCU", "flash": "external memory", "mppt": "MPPT", "tx": "THz TX data energy, tau*Pbar_k (solver)"}
+LOAD_LABELS = {"camera": "camera", "mcu": "MCU", "flash": "memory", "mppt": "MPPT", "tx": "THz TX data, τP̄_k"}
 LEGACY_KEYS = ("camera", "mcu", "flash", "mppt")
 # stage-6 event components beyond the four above (colour, label); LOAD_COLORS / LOAD_LABELS stay as they were
-_EXTRA = {"photomixer": ("#5a8f6b", "photomixer (sleep)")}
+_EXTRA = {"photomixer": ("#5a8f6b", "photomixer")}
 _color = lambda k: LOAD_COLORS.get(k, _EXTRA.get(k, (INK2, k))[0])
 _label = lambda k: LOAD_LABELS.get(k, _EXTRA.get(k, (INK2, k))[1])
 
@@ -49,7 +49,11 @@ def plot_slave_load_per_slot(jp: JointParams, r: JointResult, load: dict, path: 
     for k in _overhead_keys(load) + ("tx",):
         ax.bar(t, comp[k], bottom=bottom, color=_color(k), width=0.8, label=_label(k), zorder=2)
         bottom += comp[k]
-    ax.set_ylabel("slave energy per slot [J]")
+    pos = [comp[k][comp[k] > 0] for k in _overhead_keys(load)]    # tx can be ~1e-16 J; floor the axis on the overheads
+    pos = np.concatenate(pos) if pos else np.array([1.0])
+    ax.set_yscale("log")
+    ax.set_ylim(0.5 * pos.min(), 2.0 * max(comp["load"].max(), pos.max()))
+    ax.set_ylabel("slave energy per slot [J]", fontsize=AXIS_FONTSIZE)
     _legend(ax)
     _finish(fig, ax, path, "Slave energy per slot by component", title, jp)
 
@@ -64,14 +68,14 @@ def plot_slave_energy_breakdown(jp: JointParams, r: JointResult, load: dict, pat
     y = np.arange(len(ks))
     ax.barh(y, [tot[k] for k in ks], color=[_color(k) for k in ks], height=0.6, zorder=2)
     for yi, k in zip(y, ks):
-        ax.annotate(f"  {tot[k]:.4g} J ({100 * tot[k] / T:.1f}%)", (tot[k], yi), va="center", fontsize=9, color=INK)
+        ax.annotate(f"  {tot[k]:.4g} J ({100 * tot[k] / T:.1f}%)", (tot[k], yi), va="center", fontsize=LEGEND_FONTSIZE, color=INK)
     ax.set_yticks(y)
-    names = {"camera": "camera", "mcu": "MCU", "flash": "external memory", "mppt": "MPPT", "tx": "THz TX data (solver)",
-             "photomixer": "photomixer (sleep)"}
+    names = {"camera": "camera", "mcu": "MCU", "flash": "memory", "mppt": "MPPT", "tx": "THz TX data (solver)",
+             "photomixer": "photomixer"}
     ax.set_yticklabels([names.get(k, k) for k in ks], color=INK2)
     ax.invert_yaxis()
     ax.set_xlim(0, 1.3 * max(tot.values()))
-    ax.set_xlabel("energy over all slots [J]")
+    ax.set_xlabel("energy over all slots [J]", fontsize=AXIS_FONTSIZE)
     ax.grid(False)
     ax.grid(True, axis="x", color=GRID, lw=0.8)
     _finish(fig, ax, path, "Slave energy over the horizon by component", title, None)
@@ -87,11 +91,11 @@ def plot_slave_cumulative_energy(jp: JointParams, r: JointResult, load: dict, pa
     stored = jp.g_init + np.cumsum(jp.a * r.delta)
     fig, ax = _new_axis()
     _shade_silent(ax, jp)
-    ax.plot(t, stored, color=INK2, lw=2, label="cumulative stored from the link + initial excess, (b0 - B_min) + sum a_i delta_i")
-    ax.plot(t, consumed, color=C_SLAVE, lw=2, label="cumulative consumed, sum (c_i + tau*Pbar_i)")
-    ax.plot(t, np.cumsum(comp["c"]), color=C_SLAVE, lw=1.2, ls="--", label="of which electronics only, sum c_i")
-    ax.fill_between(t, consumed, stored, color=C_SLAVE, alpha=0.12, lw=0, label="gap = energy held above the floor")
-    ax.set_ylabel("cumulative energy [J]")
+    ax.plot(t, stored, color=INK2, lw=2, label="stored from link")
+    ax.plot(t, consumed, color=C_SLAVE, lw=2, label="consumed")
+    ax.plot(t, np.cumsum(comp["c"]), color=C_SLAVE, lw=1.2, ls="--", label="electronics only")
+    ax.fill_between(t, consumed, stored, color=C_SLAVE, alpha=0.12, lw=0, label="held above floor")
+    ax.set_ylabel("cumulative energy [J]", fontsize=AXIS_FONTSIZE)
     ax.set_ylim(bottom=0)
     _legend(ax)
     _finish(fig, ax, path, "Slave cumulative energy: consumed vs stored", title, jp)
@@ -104,13 +108,13 @@ def plot_slave_battery_window(jp: JointParams, r: JointResult, load: dict, path:
     t = np.arange(jp.master.N)
     fig, ax = _new_axis()
     _shade_silent(ax, jp)
-    ax.step(t, r.b - jp.B_min, where="mid", color=C_SLAVE, lw=2, label="end of slot k, b_k - B_min")
+    ax.step(t, r.b - jp.B_min, where="mid", color=C_SLAVE, lw=2, label="end of slot")
     ax.step(t, r.b_peak - jp.B_min, where="mid", color=C_SLAVE, lw=1.2, ls="--", alpha=0.8,
-            label="right after arrival, b_(k-1) + a_k delta_k - B_min")
-    ax.axhline(jp.W, color=INK, lw=1.2, ls=":", label=f"window W = B_max - B_min = {jp.W:.4g} J")
-    ax.axhline(sz["W_req"], color=C_LINK, lw=1.2, ls="--", label=f"profile W_req = {sz['W_req']:.4g} J")
-    ax.axhline(sz["W_design"], color=C_MCU, lw=1.2, ls="--", label=f"profile W_design = {sz['W_design']:.4g} J")
-    ax.set_ylabel("usable slave energy above the floor [J]")
+            label="after arrival")
+    ax.axhline(jp.W, color=INK, lw=1.2, ls=":", label=f"W = {jp.W:.4g} J")
+    ax.axhline(sz["W_req"], color=C_LINK, lw=1.2, ls="--", label=f"W_req = {sz['W_req']:.4g} J")
+    ax.axhline(sz["W_design"], color=C_MCU, lw=1.2, ls="--", label=f"W_design = {sz['W_design']:.4g} J")
+    ax.set_ylabel("usable slave energy above the floor [J]", fontsize=AXIS_FONTSIZE)
     ax.set_ylim(bottom=0)
     _legend(ax)
     _finish(fig, ax, path, "Slave storage window", title, jp)
@@ -186,19 +190,19 @@ def plot_event_bursts(jp: JointParams, r: JointResult, link_rows: list, profile:
     run = [x for x in link_rows if x["outcome"] in ("run", "rescheduled")]
     rs = np.array([x["run"] for x in run], int)
     xs = np.array([x["x_J"] for x in run], float)
-    ax1.bar(rs, xs * 1e3, color=C_SLAVE, width=0.8, zorder=2, label="burst energy x_k (event ran)")
+    ax1.bar(rs, xs * 1e3, color=C_SLAVE, width=0.8, zorder=2, label="burst x_k")
     resched = [x for x in run if x["outcome"] == "rescheduled"]
     if resched:
         ax1.scatter([x["run"] for x in resched], [x["x_J"] * 1e3 for x in resched], marker="o", s=40, facecolor="none",
-                    edgecolor=INK, zorder=3, label="rescheduled event (ran after its release slot)")
+                    edgecolor=INK, zorder=3, label="rescheduled")
     dropped = [x["release"] for x in link_rows if x["outcome"] == "dropped"]
     if dropped:
-        ax1.scatter(dropped, np.zeros(len(dropped)), marker="x", s=50, color=C_LINK, zorder=3, label="dropped event (release slot)")
-    ax1.axhline(profile["x_cap"] * 1e3, color=INK2, lw=1.2, ls="--", label=f"x_cap = {profile['x_cap'] * 1e3:.4g} mJ (20 mW radiated)")
-    ax1.axhline(profile["x_min"] * 1e3, color=C_LINK, lw=1.2, ls=":", label=f"x_min = {profile['x_min'] * 1e3:.4g} mJ (1 mW radiated)")
-    ax1.set_ylabel("burst energy [mJ]")
+        ax1.scatter(dropped, np.zeros(len(dropped)), marker="x", s=50, color=C_LINK, zorder=3, label="dropped")
+    ax1.axhline(profile["x_cap"] * 1e3, color=INK2, lw=1.2, ls="--", label=f"x_cap = {profile['x_cap'] * 1e3:.4g} mJ")
+    ax1.axhline(profile["x_min"] * 1e3, color=C_LINK, lw=1.2, ls=":", label=f"x_min = {profile['x_min'] * 1e3:.4g} mJ")
+    ax1.set_ylabel("burst energy [mJ]", fontsize=AXIS_FONTSIZE)
     ax1.set_ylim(bottom=0)
-    ax1.set_title("THz burst energy per event", loc="left", color=INK2, fontsize=10)
+    ax1.set_title("THz burst energy per event", loc="left", color=INK2, fontsize=AXIS_FONTSIZE)
     _legend(ax1, "upper left")
     if run:
         snr_db = np.array([x["snr_dB"] for x in run], float)
@@ -207,15 +211,15 @@ def plot_event_bursts(jp: JointParams, r: JointResult, link_rows: list, profile:
         if fin.size:                                  # equal SNRs would otherwise get an offset axis
             ax2.set_ylim(fin.min() - 1.0, fin.max() + 1.0)
     ax2.ticklabel_format(axis="y", useOffset=False)
-    ax2.set_ylabel("burst SNR [dB]")
+    ax2.set_ylabel("burst SNR [dB]", fontsize=AXIS_FONTSIZE)
     ax2.set_xlim(-0.5, jp.master.N - 0.5)
     ax3 = ax2.twinx()
     if run:
-        ax3.semilogy(rs, [max(x["ber"], 1e-300) for x in run], "s", color=C_MASTER, mfc="none", label="theoretical BER (right)")
+        ax3.semilogy(rs, [max(x["ber"], 1e-300) for x in run], "s", color=C_MASTER, mfc="none", label="BER (right)")
     ax3.axhline(ber_target, color=C_MASTER, lw=1, ls=":", label=f"BER target {ber_target:g}")
-    ax3.set_ylabel("BER", color=C_MASTER)
+    ax3.set_ylabel("BER", color=C_MASTER, fontsize=AXIS_FONTSIZE)
     h1, l1 = ax2.get_legend_handles_labels()
     h2, l2 = ax3.get_legend_handles_labels()
-    ax2.legend(h1 + h2, l1 + l2, fontsize=8, loc="upper left", frameon=False)
-    ax2.set_title("Burst SNR and theoretical BER", loc="left", color=INK2, fontsize=10)
+    ax2.legend(h1 + h2, l1 + l2, fontsize=LEGEND_FONTSIZE, loc="upper left", frameon=False)
+    ax2.set_title("Burst SNR and theoretical BER", loc="left", color=INK2, fontsize=AXIS_FONTSIZE)
     _finish(fig, (ax1, ax2), path, "Slave THz bursts: energy, SNR and BER per event", title, jp)
