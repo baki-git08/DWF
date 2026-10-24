@@ -675,10 +675,28 @@ def plot_received_power_vs_distance(jp, r, link: dict, path: str, title: str = "
     The operating distances D_UOWC_M and D_THZ_M are marked.  link = slave_load.thz_link() (preset, gains, noise).
     """
     import slave_config as cfg
-    from scipy.optimize import brentq
-    from .style import AXIS_FONTSIZE, TICK_FONTSIZE, C_LINK, C_SLAVE, GRID, INK, INK2, _style
+    from .style import C_LINK
 
+    # ---- optical energy link: peak received power only ----------------------------------------------------
     tau = jp.master.tau
+    sent = np.asarray(r.delta, float) / tau                             # master electrical sharing power [W]
+    on = sent > 1e-12 * max(sent.max(), 1e-300)
+    optical = []
+    if on.any():
+        optical.append(dict(c=cfg.UOWC_C_PER_M, p_tx=sent[on].max(), color=C_LINK, label="optical link, peak",
+                            op_label=f"optical op. point, {cfg.D_UOWC_M:g} m"))
+    head = "Received power vs distance: optical energy link and THz data link" + (f"\n{title}" if title else "")
+    _plot_rx_vs_distance(optical, link, path, head)
+
+
+def _plot_rx_vs_distance(optical, link: dict, path: str, head: str, d_max_m: float = 20.0):
+    """Shared body of the received-power-vs-distance figures: optical curves on the bottom axis [m], the THz link on a
+    twin top axis [mm], one y-axis [dBm].  optical: list of dict(c, p_tx, color, label, op_label), one curve each,
+    P_rx(d) = p_tx * uowc_alpha(d, c, ETA_LD, UOWC_GEOM), with a marker at D_UOWC_M (op_label None: no legend entry)."""
+    import slave_config as cfg
+    from scipy.optimize import brentq
+    from .style import AXIS_FONTSIZE, TICK_FONTSIZE, C_SLAVE, GRID, INK, INK2, _style
+
     fig, ax = plt.subplots(figsize=(12.5, 6.0), facecolor="white")
     _style(ax)
     ax.grid(True, axis="both", color=GRID, lw=1)
@@ -688,17 +706,14 @@ def plot_received_power_vs_distance(jp, r, link: dict, path: str, title: str = "
         axt.spines[sp].set_visible(False)
     axt.spines["top"].set_color(GRID)
 
-    # ---- optical energy link: peak received power only (distance in m, bottom axis) ----------------------
-    d_o = np.linspace(0.0, 20.0, 400)                                  # 0 .. 100 m
-    alpha_d = ch.uowc_alpha(d_o, cfg.UOWC_C_PER_M, cfg.ETA_LD, cfg.UOWC_GEOM)
-    sent = np.asarray(r.delta, float) / tau                             # master electrical sharing power [W]
-    on = sent > 1e-12 * max(sent.max(), 1e-300)
-    if on.any():
-        p_tx = sent[on].max()
-        ax.plot(d_o, _dbm(p_tx * alpha_d), color=C_LINK, lw=4, label="optical link, peak")
-        d_op = cfg.D_UOWC_M
-        p_op = p_tx * float(ch.uowc_alpha(d_op, cfg.UOWC_C_PER_M, cfg.ETA_LD, cfg.UOWC_GEOM))
-        ax.plot(d_op, _dbm(p_op), "o", color=C_LINK, mec=INK, ms=14, label=f"optical op. point, {d_op:g} m")
+    # ---- optical energy link (distance in m, bottom axis) ------------------------------------------------
+    d_o = np.linspace(0.0, d_max_m, 400)
+    d_op = cfg.D_UOWC_M
+    for o in optical:
+        alpha_d = ch.uowc_alpha(d_o, o["c"], cfg.ETA_LD, cfg.UOWC_GEOM)
+        ax.plot(d_o, _dbm(o["p_tx"] * alpha_d), color=o["color"], lw=4, label=o["label"])
+        p_op = o["p_tx"] * float(ch.uowc_alpha(d_op, o["c"], cfg.ETA_LD, cfg.UOWC_GEOM))
+        ax.plot(d_op, _dbm(p_op), "o", color=o["color"], mec=INK, ms=14, label=o["op_label"] or "_nolegend_")
 
     # ---- THz data link ----------------------------------------------------------------------
     d_t = np.linspace(0.01, 1.5, 300) * 1e-3
@@ -725,7 +740,7 @@ def plot_received_power_vs_distance(jp, r, link: dict, path: str, title: str = "
     pr_op = float(b_op["pr_dbw"]) + 30
     axt.plot(link["d_eff"] * 1e3, pr_op, "s", color=C_SLAVE, mec=INK, ms=14, label=f"THz op. point, {link['d_eff'] * 1e3:g} mm")
 
-    ax.set_xlim(0, 20)
+    ax.set_xlim(0, d_max_m)
     axt.set_xlim(0, 1.5)
     ax.set_xlabel("optical link distance [m]", fontsize=AXIS_FONTSIZE, color="black")
     axt.set_xlabel("THz link distance [mm]", fontsize=AXIS_FONTSIZE, color="black")
@@ -740,52 +755,38 @@ def plot_received_power_vs_distance(jp, r, link: dict, path: str, title: str = "
     ax.set_zorder(axt.get_zorder() + 1)                                 # keep the legend above the twin axis
     ax.patch.set_visible(False)
 
-    head = "Received power vs distance: optical energy link and THz data link" + (f"\n{title}" if title else "")
     fig.suptitle(head, x=0.01, ha="left", color=INK, fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.92))
     fig.savefig(path, dpi=140)
     plt.close(fig)
 
 
-def plot_uowc_received_power_sweep(c_values, path: str, d_max_m: float = 20.0, csv_path: str | None = None):
-    """Optical energy link only: received power vs distance, one curve per water attenuation c in c_values [1/m].
+def plot_uowc_received_power_sweep(c_values, link: dict, path: str, d_max_m: float = 20.0, csv_path: str | None = None):
+    """Received power vs distance with one optical curve per water attenuation c in c_values [1/m], on the same axes
+    as the THz data link (the figure of plot_received_power_vs_distance).
 
         P_rx(d) = P_elec * uowc_alpha(d, c, ETA_LD, UOWC_GEOM),   P_elec = LASER_P_OPT_MAX_W / ETA_LD
     i.e. the laser at its optical cap (no DWF solve: the curves do not depend on the sharing schedule).
-    D_UOWC_M is marked on every curve.  csv_path (optional) gets distance and P_rx [W] per c.
+    link = slave_load.thz_link().  csv_path (optional) gets distance and the optical P_rx [W] per c.
     """
     import csv
     import slave_config as cfg
-    from .style import C_LINK, C_MASTER, C_SLAVE, GRID, INK, INK2, _style
+    from .style import C_LINK, C_MASTER
 
     p_elec = float(cfg.LASER_P_OPT_MAX_W) / float(cfg.ETA_LD)          # electrical drive at the optical cap [W]
-    d = np.linspace(0.0, d_max_m, 400)
     d_op = float(cfg.D_UOWC_M)
-    colors = (C_LINK, C_MASTER, C_SLAVE)
-    fig, ax = plt.subplots(figsize=(12.5, 6.0), facecolor="white")
-    _style(ax)
-    ax.grid(True, axis="both", color=GRID, lw=1)
-    curves = {}
+    colors = (C_LINK, C_MASTER, "#8a5cc2")                              # C_SLAVE stays the THz curve's colour
+    optical = []
     for i, c in enumerate(c_values):
-        col = colors[i % len(colors)]
-        p_rx = p_elec * ch.uowc_alpha(d, float(c), cfg.ETA_LD, cfg.UOWC_GEOM)
-        curves[float(c)] = p_rx
         p_op = p_elec * float(ch.uowc_alpha(d_op, float(c), cfg.ETA_LD, cfg.UOWC_GEOM))
-        ax.plot(d, _dbm(p_rx), color=col, lw=4, label=f"c = {float(c):g} 1/m")
-        ax.plot(d_op, _dbm(p_op), "o", color=col, mec=INK, ms=12, label=f"{_dbm(p_op):.1f} dBm at {d_op:g} m")
-    ax.axvline(d_op, color=INK2, lw=1.6, ls=":")
-    ax.set_xlim(0, d_max_m)
-    ax.set_xlabel("optical link distance [m]", fontsize=AXIS_FONTSIZE, color="black")
-    ax.set_ylabel("received optical power [dBm]", fontsize=AXIS_FONTSIZE)
-    ax.legend(frameon=True, framealpha=0.9, facecolor="white", edgecolor=GRID, loc="upper right", ncol=len(curves),
-              fontsize=LEGEND_FONTSIZE, labelcolor=INK2)          # one column per c: curve above its marker
-    head = (f"Optical energy link: received power vs distance, laser at {cfg.LASER_P_OPT_MAX_W:g} W optical "
-            f"(ETA_LD {cfg.ETA_LD:g}, UOWC_GEOM {cfg.UOWC_GEOM:g})")
-    fig.suptitle(head, x=0.01, ha="left", color=INK, fontsize=12)
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
-    fig.savefig(path, dpi=140)
-    plt.close(fig)
+        optical.append(dict(c=float(c), p_tx=p_elec, color=colors[i % len(colors)], op_label=None,
+                            label=f"optical, c = {float(c):g} 1/m ({_dbm(p_op):.1f} dBm at {d_op:g} m)"))
+    head = (f"Received power vs distance: optical energy link (laser at {cfg.LASER_P_OPT_MAX_W:g} W optical, "
+            f"ETA_LD {cfg.ETA_LD:g}, UOWC_GEOM {cfg.UOWC_GEOM:g}) and THz data link")
+    _plot_rx_vs_distance(optical, link, path, head, d_max_m)
     if csv_path:
+        d = np.linspace(0.0, d_max_m, 400)
+        curves = {o["c"]: p_elec * ch.uowc_alpha(d, o["c"], cfg.ETA_LD, cfg.UOWC_GEOM) for o in optical}
         with open(csv_path, "w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["distance_m"] + [f"p_rx_W_c{c:g}" for c in curves])
