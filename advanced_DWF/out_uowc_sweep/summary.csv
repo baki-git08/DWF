@@ -1,0 +1,4 @@
+c_per_m,alpha,converged,objective_nats,shared_J,slave_tx_J,events_scheduled,outdir
+0.315,0.0035482855639713037,True,1.7082813696541865,2882.834901159915,0.04697620480001083,14,out_uowc_sweep\c_0p315
+0.5,0.00022123374805913345,False,,,,,out_uowc_sweep\c_0p5
+0.8,2.457684941331284e-06,False,,,,,out_uowc_sweep\c_0p8

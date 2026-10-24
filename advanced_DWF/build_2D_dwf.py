@@ -282,6 +282,7 @@ from dwf2d.demos import (  # noqa: F401
     legacy_demo,
     physical_demo,
     integrated_demo,
+    integrated_demo_uowc_sweep,
     _demo_problem,
     _integrated_problem,
     _run_demo,
@@ -296,6 +297,8 @@ from dwf2d.demos import (  # noqa: F401
 #                   legacy stage-4 flows).  That is expected, not a solver bug: inputs are NOT retuned.
 #   integrated_demo : stage 6, master = UOWC energy only, slave = THz bursts in events (slave_config.py STAGE 6
 #                   block); writes to out_integrated_demo/.
+#   integrated_demo_uowc_sweep : integrated_demo for each c in slave_config.UOWC_C_PER_M_SWEEP; writes to
+#                   out_uowc_sweep/c_<value>/ plus out_uowc_sweep/summary.csv.
 # ----------------------------------------------------------------------------
 # DEMO = "legacy_demo"
 DEMO = "integrated_demo"
@@ -303,9 +306,12 @@ DEMO = "integrated_demo"
 
 if __name__ == "__main__":
     import sys
-    # Run as a script:  python build_2D_dwf.py [legacy_demo | physical_demo | integrated_demo]   (or edit DEMO above)
+    # Run as a script:  python build_2D_dwf.py [legacy_demo | physical_demo | integrated_demo | integrated_demo_uowc_sweep]
+    # (or edit DEMO above)
     which = sys.argv[1] if len(sys.argv) > 1 else DEMO
-    demos = {"legacy_demo": legacy_demo, "physical_demo": physical_demo, "integrated_demo": integrated_demo}
+    demos = {"legacy_demo": legacy_demo, "physical_demo": physical_demo, "integrated_demo": integrated_demo,
+             "integrated_demo_uowc_sweep": integrated_demo_uowc_sweep}
     if which not in demos:
-        raise SystemExit("usage: python build_2D_dwf.py [legacy_demo | physical_demo | integrated_demo]")
+        raise SystemExit("usage: python build_2D_dwf.py [legacy_demo | physical_demo | integrated_demo | "
+                         "integrated_demo_uowc_sweep]")
     demos[which]()

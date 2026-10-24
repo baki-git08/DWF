@@ -102,6 +102,8 @@ PM_DC_MODE = "proportional"          # "proportional": burst energy is a DWF var
 D_UOWC_M = 15                         # master -> slave optical (energy) distance [m]; the link works over 1 - 5 m,
 #                                      5 m = the far end (conservative).  NOT the THz distance (D_THZ_M, mm range).
 UOWC_C_PER_M = 0.315                 # water attenuation at 450 nm [1/m] (given)
+UOWC_C_PER_M_SWEEP = [0.315, 0.5, 0.8]   # attenuation values for integrated_demo_uowc_sweep [1/m]; each run sets
+#                                      UOWC_C_PER_M to one value and writes to out_uowc_sweep/c_<value>/
 UOWC_GEOM = 1.0                      # DUMMY: fraction of the laser beam the slave's PV array captures at D_UOWC_M
 #                                      (beam divergence vs PV aperture).  1.0 = no spreading loss; at metres a real
 #                                      beam spreads, so this is optimistic until a beam/aperture value is set.

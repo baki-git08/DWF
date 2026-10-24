@@ -236,6 +236,40 @@ def integrated_demo(outdir: str = "out_integrated_demo", preset: str | None = No
     return jp, r_rep, ph_rep
 
 
+def integrated_demo_uowc_sweep(outdir: str = "out_uowc_sweep", c_values=None, preset: str | None = None):
+    """integrated_demo once per UOWC attenuation c in c_values (default slave_config.UOWC_C_PER_M_SWEEP).
+
+    Each run writes its full output to outdir/c_<value>/ (0.315 -> c_0p315); outdir/summary.csv has one row per c.
+    slave_config.UOWC_C_PER_M is set for the run and restored afterwards."""
+    import csv
+    import os
+    import slave_config as cfg
+    c_values = cfg.UOWC_C_PER_M_SWEEP if c_values is None else c_values
+    os.makedirs(outdir, exist_ok=True)
+    c_orig = cfg.UOWC_C_PER_M
+    rows = []
+    try:
+        for c in c_values:
+            cfg.UOWC_C_PER_M = float(c)
+            sub = os.path.join(outdir, f"c_{float(c):g}".replace(".", "p"))
+            print(f"\n===== UOWC sweep: c = {float(c):g} 1/m -> {sub} =====")
+            jp, r, _ = integrated_demo(sub, preset)
+            ok = r is not None          # False: the refusal loop found no feasible schedule (see refusal_history.csv)
+            alpha = uowc_alpha(cfg.D_UOWC_M, cfg.UOWC_C_PER_M, cfg.ETA_LD, cfg.UOWC_GEOM)
+            rows.append(dict(c_per_m=float(c), alpha=float(np.ravel(alpha)[0]), converged=ok,
+                             objective_nats=r.objective if ok else "", shared_J=float(r.delta.sum()) if ok else "",
+                             slave_tx_J=float(jp.master.tau * r.Pbar.sum()) if ok else "",
+                             events_scheduled=int(np.sum(jp.slave_schedule)) if ok else "", outdir=sub))
+    finally:
+        cfg.UOWC_C_PER_M = c_orig
+    with open(os.path.join(outdir, "summary.csv"), "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    print(f"\nwrote {len(rows)} sweep runs and summary.csv to {outdir}")
+    return rows
+
+
 def physical_demo(outdir: str = "out_physical_demo"):
     """Slave electronics at DUMMY timing (slave_config.py), S5 on, window from size_storage()."""
     import slave_load
