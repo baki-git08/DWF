@@ -125,7 +125,7 @@ def _integrated_problem(preset: str | None = None, n_periods: int = 1):
     # h = 1.0 is a PLACEHOLDER: with theta1 = 0 the master has no data, so h only appears in step() with weight 0.
     # Master battery: capacity MASTER_E_MAX_J (M2) and reserve floor MASTER_FLOOR_J (M6) from slave_config.py.
     # Half-harvest scenario: Harvested_energy_winter_half (use Harvested_energy_winter for the full-day harvest).
-    master = MasterParams(E=np.tile(Harvested_energy_winter_half, int(n_periods)), E_max=float(cfg.MASTER_E_MAX_J),
+    master = MasterParams(E=np.tile(Harvested_energy_winter, int(n_periods)), E_max=float(cfg.MASTER_E_MAX_J),
                           tau=60.0, h=1.0)
     jp0 = JointParams(master=master, alpha=uowc_alpha(cfg.D_UOWC_M, cfg.UOWC_C_PER_M, cfg.ETA_LD, cfg.UOWC_GEOM), beta=0.8,
                       theta1=0.0, slave_schedule=cfg.SLAVE_SCHEDULE, master_floor_J=cfg.MASTER_FLOOR_J)
