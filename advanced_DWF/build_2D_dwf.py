@@ -283,6 +283,7 @@ from dwf2d.demos import (  # noqa: F401
     physical_demo,
     integrated_demo,
     integrated_demo_uowc_sweep,
+    uowc_received_power_sweep,
     _demo_problem,
     _integrated_problem,
     _run_demo,
@@ -299,6 +300,8 @@ from dwf2d.demos import (  # noqa: F401
 #                   block); writes to out_integrated_demo/.
 #   integrated_demo_uowc_sweep : integrated_demo for each c in slave_config.UOWC_C_PER_M_SWEEP; writes to
 #                   out_uowc_sweep/c_<value>/ plus out_uowc_sweep/summary.csv.
+#   uowc_received_power_sweep : optical link received power vs distance only, one curve per c in
+#                   UOWC_C_PER_M_SWEEP (no DWF solve); writes to out_uowc_received_power/.
 # ----------------------------------------------------------------------------
 # DEMO = "legacy_demo"
 DEMO = "integrated_demo"
@@ -306,12 +309,14 @@ DEMO = "integrated_demo"
 
 if __name__ == "__main__":
     import sys
-    # Run as a script:  python build_2D_dwf.py [legacy_demo | physical_demo | integrated_demo | integrated_demo_uowc_sweep]
+    # Run as a script:  python build_2D_dwf.py [legacy_demo | physical_demo | integrated_demo | integrated_demo_uowc_sweep |
+    #                                   uowc_received_power_sweep]
     # (or edit DEMO above)
     which = sys.argv[1] if len(sys.argv) > 1 else DEMO
     demos = {"legacy_demo": legacy_demo, "physical_demo": physical_demo, "integrated_demo": integrated_demo,
-             "integrated_demo_uowc_sweep": integrated_demo_uowc_sweep}
+             "integrated_demo_uowc_sweep": integrated_demo_uowc_sweep,
+             "uowc_received_power_sweep": uowc_received_power_sweep}
     if which not in demos:
         raise SystemExit("usage: python build_2D_dwf.py [legacy_demo | physical_demo | integrated_demo | "
-                         "integrated_demo_uowc_sweep]")
+                         "integrated_demo_uowc_sweep | uowc_received_power_sweep]")
     demos[which]()

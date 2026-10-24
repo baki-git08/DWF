@@ -20,7 +20,9 @@ from .plotting.slave_panels import (
     plot_event_bursts, plot_slave_battery_window, plot_slave_cumulative_energy, plot_slave_energy_breakdown,
     plot_slave_load_per_slot, write_refusal_history_csv, write_slave_energy_csv,
 )
-from .plotting.thz_link import plot_received_power_vs_distance, setup_from_slave_config, write_thz_link_plots
+from .plotting.thz_link import (
+    plot_received_power_vs_distance, plot_uowc_received_power_sweep, setup_from_slave_config, write_thz_link_plots,
+)
 
 
 # ----------------------------------------------------------------------------
@@ -268,6 +270,20 @@ def integrated_demo_uowc_sweep(outdir: str = "out_uowc_sweep", c_values=None, pr
         w.writerows(rows)
     print(f"\nwrote {len(rows)} sweep runs and summary.csv to {outdir}")
     return rows
+
+
+def uowc_received_power_sweep(outdir: str = "out_uowc_received_power", c_values=None):
+    """Optical link received power vs distance only, one curve per c in c_values (default UOWC_C_PER_M_SWEEP).
+    No DWF solve; writes received_power_vs_distance.png and received_power_vs_distance.csv to outdir."""
+    import os
+    import slave_config as cfg
+    c_values = cfg.UOWC_C_PER_M_SWEEP if c_values is None else c_values
+    os.makedirs(outdir, exist_ok=True)
+    png = os.path.join(outdir, "received_power_vs_distance.png")
+    plot_uowc_received_power_sweep(c_values, png, csv_path=os.path.join(outdir, "received_power_vs_distance.csv"))
+    print(f"wrote received_power_vs_distance.png/.csv for c = {', '.join(f'{float(c):g}' for c in c_values)} 1/m "
+          f"to {outdir}")
+    return png
 
 
 def physical_demo(outdir: str = "out_physical_demo"):
