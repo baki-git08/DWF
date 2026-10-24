@@ -93,13 +93,13 @@ MODULATION = "16-QAM"                # t_tx = 8*PAYLOAD_BYTES / (R_s * bits_per_
 # ---------------- photomixer (THz source) ----------------
 P_PM_RAD_MAX_W = 0.020               # radiated power cap (antenna 50-100 ohm)
 P_PM_ELEC_W = 0.200                  # electrical power while transmitting at the cap
-P_PM_RAD_MIN_W = 0.0005               # radiated floor: a burst below it is refused
+P_PM_RAD_MIN_W = 0.005               # radiated floor: a burst below it is refused
 ETA_TX_PM = P_PM_RAD_MAX_W / P_PM_ELEC_W   # = 0.1, radiated / electrical  (legacy ETA_TX above is a different, DUMMY knob)
 PM_DC_MODE = "proportional"          # "proportional": burst energy is a DWF variable in [x_min, x_cap]
 #                                      "fixed_bias"  : every event costs P_PM_ELEC_W * t_tx (fixed, in c_i)
 
 # ---------------- energy chain: UOWC -> PV -> MPPT -> supercap ----------------
-D_UOWC_M = 14                        # master -> slave optical (energy) distance [m]; the link works over 1 - 5 m,
+D_UOWC_M = 15                         # master -> slave optical (energy) distance [m]; the link works over 1 - 5 m,
 #                                      5 m = the far end (conservative).  NOT the THz distance (D_THZ_M, mm range).
 UOWC_C_PER_M = 0.315                 # water attenuation at 450 nm [1/m] (given)
 UOWC_GEOM = 1.0                      # DUMMY: fraction of the laser beam the slave's PV array captures at D_UOWC_M
@@ -118,8 +118,8 @@ MAXIMAL_SHARING = True               # post-pass: master shares as early / as mu
 #   Priority of the master's harvest each slot: the slave's minimum (just-in-time) need -> the master's own reserve
 #   up to MASTER_FLOOR_J -> sharing (maximal-sharing post-pass, stopped by B_max / S5 / M5) -> stored up to
 #   MASTER_E_MAX_J -> spilled.  Sized for the winter harvest (3.66 - 3.92 kJ per 60 s slot).
-MASTER_E_MAX_J = 6000.0              # M2: master battery capacity [J]; float("inf") = no cap (the old behaviour)
-MASTER_FLOOR_J = 2000.0              # M6: reserve the master keeps for itself [J]; None = off (master may end empty).
+MASTER_E_MAX_J = 4900.0              # M2: master battery capacity [J]; float("inf") = no cap (the old behaviour)
+MASTER_FLOOR_J = 1000.0              # M6: reserve the master keeps for itself [J]; None = off (master may end empty).
 #                                      Must be <= MASTER_E_MAX_J - max harvest per slot (= 4079 J here).
 
 # ---------------- event timing (per EVENT, seconds; scalar or length-N array) ----------------

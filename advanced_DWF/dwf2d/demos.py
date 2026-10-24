@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from build_dwf import Harvested_energy_winter, MasterParams
+from build_dwf import Harvested_energy_winter, Harvested_energy_winter_half, MasterParams
 from dwf_diagnostics import diagnose
 
 from .channels import beer_lambert, thz_gain, uowc_alpha
@@ -115,7 +115,7 @@ def legacy_demo():
 
 
 def _integrated_problem(preset: str | None = None, n_periods: int = 1):
-    """Stage-6 problem: winter harvest, master with NO data link (theta1 = 0), battery capacity MASTER_E_MAX_J and
+    """Stage-6 problem: first-half winter harvest (slots 0-29; 0 afterwards), master with NO data link (theta1 = 0), battery capacity MASTER_E_MAX_J and
     reserve floor MASTER_FLOOR_J, UOWC energy link, event-based slave (slave_config.py STAGE 6 block).  Returns (jp0, build, link): build(effective) attaches the event load.
     n_periods repeats the 60-slot harvest (and the cyclic schedule) to N = 60 * n_periods (scalability runs)."""
     import dataclasses
@@ -123,7 +123,8 @@ def _integrated_problem(preset: str | None = None, n_periods: int = 1):
     import slave_load
     # h = 1.0 is a PLACEHOLDER: with theta1 = 0 the master has no data, so h only appears in step() with weight 0.
     # Master battery: capacity MASTER_E_MAX_J (M2) and reserve floor MASTER_FLOOR_J (M6) from slave_config.py.
-    master = MasterParams(E=np.tile(Harvested_energy_winter, int(n_periods)), E_max=float(cfg.MASTER_E_MAX_J),
+    # Half-harvest scenario: Harvested_energy_winter_half (use Harvested_energy_winter for the full-day harvest).
+    master = MasterParams(E=np.tile(Harvested_energy_winter_half, int(n_periods)), E_max=float(cfg.MASTER_E_MAX_J),
                           tau=60.0, h=1.0)
     jp0 = JointParams(master=master, alpha=uowc_alpha(cfg.D_UOWC_M, cfg.UOWC_C_PER_M, cfg.ETA_LD, cfg.UOWC_GEOM), beta=0.8,
                       theta1=0.0, slave_schedule=cfg.SLAVE_SCHEDULE, master_floor_J=cfg.MASTER_FLOOR_J)
@@ -139,7 +140,7 @@ def integrated_demo(outdir: str = "out_integrated_demo", preset: str | None = No
 
     refusal loop (physical.solve_with_refusals) around the calibrated solve (beta = R x MPPT_EFF x ETA_SC),
     then the maximal-sharing post-pass (MAXIMAL_SHARING), the THz link report and the plots / CSV in outdir.
-    Inputs are NOT tuned: winter harvest, THZ_PRESET, D_THZ_M = 1 mm, 0.047 F supercap, DUMMY values flagged."""
+    Inputs are NOT tuned: first-half winter harvest, THZ_PRESET, D_THZ_M = 1 mm, 0.047 F supercap, DUMMY values flagged."""
     import os
     import slave_config as cfg
     import slave_load
@@ -153,7 +154,8 @@ def integrated_demo(outdir: str = "out_integrated_demo", preset: str | None = No
         print(banner)
     jp0, build, link = _integrated_problem(preset)
     tb = slave_load.tx_bounds_J()
-    calib = dict(wavelength_nm=cfg.PV_CAL_WAVELENGTH_NM, mppt_efficiency=cfg.MPPT_EFF, supercap_eff=cfg.ETA_SC)
+    calib = dict(wavelength_nm=cfg.PV_CAL_WAVELENGTH_NM, mppt_efficiency=cfg.MPPT_EFF, supercap_eff=cfg.ETA_SC,
+                 fill_idle_beta=True)     # the post-pass may send in slots the optimiser left idle
     #   tol: joint_dwf stops at tol * mean(E) (kJ per slot); the bursts are mJ, so the default 1e-10 would stop at
     #   ~4e-7 J.  1e-15 puts the stop near 4e-12 J (the solver itself is unchanged).
     rr = solve_with_refusals(build, jp0.slave_schedule, tb["x_min"], cfg.MAX_DELAY_SLOTS, mode=cfg.PM_DC_MODE,

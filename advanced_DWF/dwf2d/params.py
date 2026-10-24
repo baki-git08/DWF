@@ -61,11 +61,11 @@ class JointParams:
     alpha: np.ndarray | float = 0.368     # PLACEHOLDER  exp(-0.2 1/m * 5 m)
     beta: np.ndarray | float = 0.8        # PLACEHOLDER  recharging efficiency (scalar or per-slot)
     B_min: float = 200.0                  # given
-    B_max: float = 5000.0                 # given
+    B_max: float = 2000.0                 # given
     b0: float | None = None               # initial slave charge; default = B_min (ASSUMPTION)
     h_bar: np.ndarray | float = 0.1       # PLACEHOLDER  slave -> master link gain (SNR per W)
     theta1: float = 1.0                   # weight of master rate
-    theta2: float = 3.0                   # weight of slave rate
+    theta2: float = 2.0                   # weight of slave rate
     slave_schedule: np.ndarray | list | None = None   # 1 = slave may transmit, 0 = silent (None = always 1)
     slave_overhead_J: np.ndarray | float | None = None   # c_i: non-TX slave electronics energy per slot (None = 0)
     mppt_cap_J: np.ndarray | float | None = None         # S5: a_k*delta_k <= capA_k, stored energy per slot (None = inf)

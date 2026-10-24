@@ -79,23 +79,35 @@ def _jit_start(jp: "JointParams"):
 def master_floor_profile(jp: "JointParams") -> np.ndarray:
     """M6 floor of the master carry, fL (length N+1):  f[k+1] = F_k >= fL[k+1],  f[N] = fL[N] (fixed end).
 
+        S_k = min(capF_k, max(0, S_{k-1} + E_k - need_k)),  S_{-1} = 0       (fullest master: stores all but the need)
+        D_k = max(0, D_{k+1} + need_{k+1} - E_{k+1}),       D_{N-1} = 0      (future need its future harvest can't pay)
         fL[0]   = 0                                                      (nothing arrives before slot 0)
-        fL[k+1] = L_k = min(F_min, max(0, L_{k-1} + E_k - need_k))       (charge up to F_min, then hold it)
-        fL[N]   = L_{N-1}                                                (the master ENDS holding its reserve)
+        fL[k+1] = L_k = min(F_min, max(0, S_k - D_k))                    (charge up to F_min, then hold it)
+        fL[N]   = L_{N-1}                                                (the master ENDS holding at least its reserve)
 
-    need_k = just-in-time delta of _jit_start (what the slave is short of in slot k, clipped to what the master
-    has): the slave's minimum need is served first, the master's reserve second, sharing / spill come from what
-    is above the floor.  L_k <= E_max - E_{k+1} holds because JointParams checks F_min <= min(cap).
+    capF_k = E_max - E_{k+1} (k < N-1), E_max (k = N-1).  need_k = just-in-time delta of _jit_start (what the slave
+    is short of in slot k).  Priority: the slave's minimum need first, the master's reserve second, sharing / spill
+    from what is above the floor.  Energy stored ABOVE the floor pays a future need first (the D_k term); the floor
+    only gives way when even the fullest master cannot cover both, e.g. a long run without harvest.  F = S is a
+    feasible trajectory with F >= fL, so the floor never makes a feasible problem infeasible.
+    L_k <= E_max - E_{k+1} holds because JointParams checks F_min <= min(cap).
     jp.master_floor_J None -> all zeros (the original f >= 0, f[N] = 0: bit-identical solver path)."""
-    N = jp.master.N
+    m = jp.master
+    N = m.N
     fL = np.zeros(N + 1)
     if jp.master_floor_J is None:
         return fL
-    E, Fm = jp.master.E, jp.master_floor_J
+    E, Fm = m.E, jp.master_floor_J
     need = _jit_start(jp)[0]
-    for k in range(N):
-        avail = fL[k] + E[k]
-        fL[k + 1] = min(Fm, max(0.0, avail - min(need[k], avail)))
+    capF = np.append(m.cap, m.E_max) if N > 1 else np.array([m.E_max])
+    S = np.zeros(N)
+    prev = 0.0
+    for k in range(N):                                   # forward: fullest master storage
+        S[k] = prev = min(capF[k], max(0.0, prev + E[k] - need[k]))
+    D = np.zeros(N)
+    for k in range(N - 2, -1, -1):                       # backward: future need not covered by future harvest
+        D[k] = max(0.0, D[k + 1] + need[k + 1] - E[k + 1])
+    fL[1:] = np.minimum(Fm, np.maximum(0.0, S - D))
     return fL
 
 
@@ -753,13 +765,15 @@ def fullest_trajectory(jp: JointParams, x, tol: float = 1e-12) -> dict:
     With E_max = inf this trajectory is pointwise the fullest one, so it is also an exact feasibility test:
     fail_slot = first slot where even it falls below B_min (None = feasible).
     With a master floor (M6, jp.master_floor_J) the master only shares what is above fL[k+1]
-    (stop reason "floor") and the last slot keeps fL[N] instead of spilling it.
+    (stop reason "floor").  When the master battery is modelled (a floor or a finite E_max) the master KEEPS what
+    is left after the last slot, up to E_max (>= fL[N]); otherwise that remainder is spilled (F_{N-1} = 0).
     Returns dict(delta, spill, b, b_peak, stop, fail_slot, short_J)."""
     m = jp.master
     N, E, a = m.N, m.E, jp.a
     cS, capA, Dc = jp.overhead, jp.capA, jp.dcap
     fL = master_floor_profile(jp)
     has_floor = jp.master_floor_J is not None
+    keep_end = has_floor or np.isfinite(m.E_max)           # the master keeps its leftover instead of dumping it
     x = np.asarray(x, float)
     delta, spill, b, b_peak = np.zeros(N), np.zeros(N), np.zeros(N), np.zeros(N)
     stop = []
@@ -785,7 +799,8 @@ def fullest_trajectory(jp: JointParams, x, tol: float = 1e-12) -> dict:
         b[k] = level
         left = avail - dk
         if k == N - 1:
-            spill[k], carry = left - fL[N], 0.0           # the master ends holding its reserve fL[N] (0 = off)
+            kept = min(left, m.E_max) if keep_end else 0.0  # battery modelled: keep up to E_max (>= fL[N])
+            spill[k], carry = left - kept, 0.0
         else:
             carry = min(left, m.E_max - E[k + 1])
             spill[k] = left - carry
@@ -806,7 +821,8 @@ def maximal_sharing(jp: JointParams, r: JointResult, tol: float = 1e-12):
             b_k      = b_peak_k - c_k - x_k              (>= B_min: the fullest trajectory dominates the optimum)
             F_k      = E_k + F_{k-1} - delta_k - spill_k,  spill_k = max(0, F_k_unclipped - (E_max - E_{k+1}));
                        F_{N-1} = 0 (what is left in the last slot is spilled)
-            with a master floor (M6): delta_k <= E_k + F_{k-1} - fL[k+1] (stop "floor") and F_{N-1} = fL[N]
+            with a master floor (M6): delta_k <= E_k + F_{k-1} - fL[k+1] (stop "floor");
+            with a floor or a finite E_max: F_{N-1} = min(what is left, E_max) (kept, not spilled)
 
     "spill" is the master's unused energy (tau*P_i in the result).  The terminal condition g[N] = 0 of the
     solver is dropped: the slave may end above B_min.  If the master's energy cannot keep the fullest trajectory

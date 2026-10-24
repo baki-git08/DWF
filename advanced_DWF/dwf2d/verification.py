@@ -223,7 +223,8 @@ def reference_solution_joint(jp: JointParams):
 # Randomised cross-check of joint_dwf against reference_solution_joint (stage-6 gate)
 # ----------------------------------------------------------------------------
 PARITY_FAMILIES = ("default", "tight_window", "per_slot_beta", "finite_E_max", "s6_binding",
-                   "s6_s5_binding", "rate_window", "theta1_zero", "integrated_like", "master_floor")
+                   "s6_s5_binding", "rate_window", "theta1_zero", "integrated_like", "master_floor",
+                   "harvest_gap")
 
 
 def random_parity_case(rng: np.random.Generator, family: str) -> JointParams:
@@ -241,6 +242,7 @@ def random_parity_case(rng: np.random.Generator, family: str) -> JointParams:
                    T_i = 0.01 tau, small window: the stage-6 structure at test scale
     master_floor   M6: E_max in [1.5, 3] x max(E), floor in [0.2, 0.8] x (E_max - max E), theta1 = 0 in half the cases,
                    per-slot slave drain c_i (just-in-time start, floor ramp after the slave's need)
+    harvest_gap    master_floor with E = 0 in the second half (the master lives on its battery; LP-fallback start)
     """
     from build_dwf import MasterParams
     N = int(rng.integers(8, 15))
@@ -278,6 +280,14 @@ def random_parity_case(rng: np.random.Generator, family: str) -> JointParams:
     elif family == "master_floor":
         E_max = float(rng.uniform(1.5, 3.0) * E.max())
         kw["master_floor_J"] = float(rng.uniform(0.2, 0.8) * (E_max - E.max()))
+        kw["slave_overhead_J"] = rng.uniform(0.05, 0.5, N)
+        if rng.random() < 0.5:
+            kw["theta1"] = 0.0
+            kw["B_max"] = 1.0 + float(rng.uniform(2.0, 20.0))
+    elif family == "harvest_gap":
+        E_max = float(rng.uniform(1.5, 3.0) * E.max())
+        kw["master_floor_J"] = float(rng.uniform(0.2, 0.8) * (E_max - E.max()))
+        E[N // 2:] = 0.0                                  # no harvest in the second half
         kw["slave_overhead_J"] = rng.uniform(0.05, 0.5, N)
         if rng.random() < 0.5:
             kw["theta1"] = 0.0

@@ -137,6 +137,7 @@ def solve_with_physical_chain(
     max_outer: int = 30,
     supercap_eff: float = 1.0,
     solver_kw: dict | None = None,
+    fill_idle_beta: bool = False,
 ):
     """Fixed-point calibration: re-solve joint_dwf() with a per-slot beta equal to the real
     photodiode+MPPT chain's secant gain, until beta stops changing. joint_dwf() itself is never
@@ -153,7 +154,10 @@ def solve_with_physical_chain(
     the loop (they do not depend on beta); only beta_i is calibrated.
 
     Slots with delta_i == 0 have nothing to calibrate on (arrived_power_i == 0 -> eff_phys_i is
-    NaN); their beta is left unchanged from the previous iterate.
+    NaN); their beta is left unchanged from the previous iterate.  fill_idle_beta=True instead gives them the
+    median of the calibrated slots, so a later pass that DOES send there (the maximal-sharing post-pass) uses the
+    real chain gain, not the placeholder beta (the chain gain varies only slightly with power).  False (default)
+    keeps the original behaviour.
 
     supercap_eff (slave_config.ETA_SC) is passed to physical_stored_power, so the calibrated beta_i is the
     full chain gain R x MPPT_EFF x ETA_SC (mppt_efficiency carries MPPT_EFF).  1.0 (default) = off.
@@ -185,6 +189,8 @@ def solve_with_physical_chain(
         on = r.delta > 1e-9 * max(jp.master.E.mean(), 1.0)         # only calibrate where energy actually moves
         beta_new = beta.copy()
         beta_new[on] = ph.eff_phys[on]
+        if fill_idle_beta and np.any(on) and not np.all(on):
+            beta_new[~on] = float(np.median(ph.eff_phys[on]))   # idle slots: the typical real chain gain
         moved = float(np.max(np.abs(beta_new - beta))) if np.any(on) else 0.0
         beta = beta_new
         if moved < tol:

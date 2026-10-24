@@ -94,6 +94,10 @@ Harvested_energy_winter = np.array([
     3746.7250704655835, 3675.7214976087707, 3659.1246662885324,
 ])
 
+# Half-harvest scenario: the winter harvest in slots 0-29, nothing in slots 30-59 (the master lives on its battery).
+Harvested_energy_winter_half = Harvested_energy_winter.copy()
+Harvested_energy_winter_half[1:] = 0.0
+
 
 # --------------------------------------------------------------------------
 # Problem definition
